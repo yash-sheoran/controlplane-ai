@@ -1,0 +1,7 @@
+{
+  "_comment": "Section 3 Step 5 callout: cost is calculated from this file, kept separate from code so it can be updated without a deployment. Only the low-tier '< $0.001/1K tokens' bound (Section 3 Step 3 routing table) is a value stated in the architecture document; the mid/high figures below are illustrative placeholders scaled from that single data point, not values taken from the document.",
+  "claude-haiku-4-5": {"input_price_per_1k_usd": 0.0008, "output_price_per_1k_usd": 0.0009},
+  "claude-sonnet-4-6": {"input_price_per_1k_usd": 0.003, "output_price_per_1k_usd": 0.015},
+  "claude-opus": {"input_price_per_1k_usd": 0.015, "output_price_per_1k_usd": 0.075},
+  "_default": {"input_price_per_1k_usd": 0.003, "output_price_per_1k_usd": 0.015}
+}

@@ -1,0 +1,104 @@
+import json
+import uuid
+
+from django.db import transaction
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+
+from .models import Trace, UseCaseProfile
+
+
+def health_check(request):
+    """Lightweight liveness endpoint for this step's smoke test.
+
+    Not part of the architecture doc's request pipeline (that begins with
+    Step 2 — Request Ingestion) — this only confirms the Django project and
+    its database connection are wired up correctly.
+    """
+    return JsonResponse({"status": "ok"})
+
+
+# Section 3 Step 1 Failure row: "All failures in this step result in a 503
+# with a safe error message; the trace is never lost." The doc specifies a
+# single status code (503) for every failure mode in this step — it does not
+# distinguish a separate 400 for bad input — so this message and status are
+# reused for every rejected/failed request below.
+SAFE_ERROR_MESSAGE = "The request could not be processed. Please try again."
+
+
+def _safe_error_response():
+    return JsonResponse({"error": SAFE_ERROR_MESSAGE}, status=503)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def create_request(request):
+    """Section 3 Step 1 — Request Ingestion & Trace Initialisation.
+
+    Inputs: raw_prompt, user_id, session_id, use_case_id, client_metadata
+    Outputs: request_id (UUID), trace_object (open), timestamp
+    Latency: < 2 ms (in-memory)
+    Failure: all failures in this step result in a 503 with a safe error
+    message; the trace is never lost.
+    """
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return _safe_error_response()
+
+    if not isinstance(payload, dict):
+        return _safe_error_response()
+
+    raw_prompt = payload.get("raw_prompt")
+    user_id = payload.get("user_id")
+    session_id = payload.get("session_id")
+    use_case_id = payload.get("use_case_id")
+    client_metadata = payload.get("client_metadata")
+
+    if not isinstance(raw_prompt, str) or not raw_prompt.strip():
+        return _safe_error_response()
+    if not isinstance(user_id, str) or not user_id.strip():
+        return _safe_error_response()
+    if not isinstance(use_case_id, str) or not use_case_id.strip():
+        return _safe_error_response()
+
+    if client_metadata is None:
+        client_metadata = {}
+    if not isinstance(client_metadata, dict):
+        return _safe_error_response()
+
+    try:
+        session_uuid = uuid.UUID(str(session_id))
+    except (ValueError, TypeError, AttributeError):
+        return _safe_error_response()
+
+    try:
+        use_case = UseCaseProfile.objects.get(use_case_id=use_case_id, is_active=True)
+    except UseCaseProfile.DoesNotExist:
+        return _safe_error_response()
+
+    # Section 3 Step 1: "the trace is never lost" — wrap creation in an
+    # atomic transaction so a trace is either fully committed and returned
+    # to the caller, or not created at all; never a partial/corrupt row.
+    try:
+        with transaction.atomic():
+            trace = Trace.objects.create(
+                session_id=session_uuid,
+                user_id=user_id,
+                use_case=use_case,
+                raw_prompt=raw_prompt,
+                client_metadata=client_metadata,
+            )
+    except Exception:
+        return _safe_error_response()
+
+    return JsonResponse(
+        {
+            "request_id": str(trace.request_id),
+            "session_id": str(trace.session_id),
+            "status": trace.status,
+            "timestamp": trace.timestamp.isoformat(),
+        },
+        status=201,
+    )

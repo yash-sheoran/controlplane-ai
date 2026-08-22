@@ -1,0 +1,41 @@
+# Section 5.1 Policy Configuration Format — this is a literal transcription
+# (block style instead of the document's inline flow style; semantically
+# identical) of the document's own concrete example for DecisionSupport:
+#
+#   use_case_id: DecisionSupport
+#   geography: IN,EU # applies DPDP, GDPR rules
+#   thresholds:
+#     block: { data_leakage_risk: 8, safety_risk: 8, toxicity_risk: 9 }
+#     human_review: { safety_risk: 7, policy_violation_risk: 7, hallucination_risk: 8 }
+#     modify: { data_leakage_risk: 5, pii_detected: true }
+#     verify: { hallucination_risk: 6, correctness: 5 }
+#     max_retries: 2
+#     latency_budget_ms: 8000
+#     require_human_review_for_final_block: true
+#
+# NOTE: Section 3 Step 4 separately gives "30 s for DecisionSupport" as an
+# illustrative timeout example, which conflicts with this file's literal
+# latency_budget_ms: 8000 (8s) from Section 5.1 — another internal
+# inconsistency in the source document. This file keeps 5.1's literal
+# value since 5.1 is the actual concrete example config, not a narrative
+# aside.
+use_case_id: DecisionSupport
+geography: [IN, EU]
+thresholds:
+  block:
+    data_leakage_risk: 8
+    safety_risk: 8
+    toxicity_risk: 9
+  human_review:
+    safety_risk: 7
+    policy_violation_risk: 7
+    hallucination_risk: 8
+  modify:
+    data_leakage_risk: 5
+    pii_detected: true
+  verify:
+    hallucination_risk: 6
+    correctness: 5
+max_retries: 2
+latency_budget_ms: 8000
+require_human_review_for_final_block: true
