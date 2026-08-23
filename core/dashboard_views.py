@@ -11,6 +11,7 @@ import json
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from . import dashboard
@@ -179,13 +180,16 @@ def fpr_tuning(request):
     return render(request, "core/fpr_tuning.html", context)
 
 
+@csrf_exempt
 @require_http_methods(["POST"])
 def submit_thumbs_down(request, trace_id):
     """Section 7.1 User Thumbs-Down: "A lightweight user-facing feedback
     mechanism captures explicit dissatisfaction." A plain JSON API
     endpoint (unlike the dashboard's HTML-form views above) since this is
     meant to be called from the end-user-facing application, not the
-    operator dashboard."""
+    operator dashboard. csrf_exempt for the same reason core.views.
+    create_request is: an external API caller has no Django session/CSRF
+    cookie to present."""
     trace = get_object_or_404(Trace, request_id=trace_id)
     try:
         payload = json.loads(request.body.decode("utf-8")) if request.body else {}

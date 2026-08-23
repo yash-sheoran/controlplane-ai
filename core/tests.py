@@ -2098,6 +2098,24 @@ class ThumbsDownViewTests(TestCase):
         response = self.client.post(f"/api/feedback/{uuid.uuid4()}/thumbs-down/")
         self.assertEqual(response.status_code, 404)
 
+    def test_thumbs_down_works_without_a_csrf_token_like_a_real_external_caller(self):
+        """Regression test: this endpoint is documented (Section 7.1,
+        and its own docstring) as an external-API endpoint like
+        core.views.create_request, meant to be called by a client with no
+        Django session/CSRF cookie. The default Django test Client does
+        not enforce CSRF, which is exactly how a prior version of this
+        view silently shipped without @csrf_exempt and 403'd on every
+        real curl request — this test uses enforce_csrf_checks=True so
+        that regression cannot return unnoticed."""
+        from django.test import Client
+        strict_client = Client(enforce_csrf_checks=True)
+        response = strict_client.post(
+            f"/api/feedback/{self.trace.request_id}/thumbs-down/",
+            data=json.dumps({"comment": "No CSRF cookie presented."}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+
 
 class RegulationLibraryTests(TestCase):
     """Section 8 — Regulatory & Geography-Aware Compliance Module."""
