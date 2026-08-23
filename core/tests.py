@@ -6,11 +6,13 @@ from unittest.mock import patch
 from django.contrib import admin
 from django.test import TestCase
 
+from . import agentic_gate as ag
 from . import auditing_engine as ae
 from . import decision_executor as de
 from . import model_pipeline as mp
 from . import policy_engine as pe
 from . import pre_request_analysis as pra
+from . import session_risk as sr
 from .models import AuditRecord, PolicyConfig, SessionState, Trace, UseCaseProfile
 from .views import SAFE_ERROR_MESSAGE
 
@@ -1454,3 +1456,240 @@ class EndToEndDecisionPathIntegrationTests(TestCase):
         self.assertIn("data_leakage_risk", result["admin_log"]["internal_reason"])
         self.assertNotIn("data_leakage_risk", result["user_response"])
         self.assertNotIn("8", result["user_response"])
+
+
+def _fresh_session_state():
+    return {
+        "turn_number": 0,
+        "session_risk_accumulator": 0.0,
+        "recent_risk_scores": [],
+        "verify_count": 0,
+        "modify_count": 0,
+        "human_review_count": 0,
+        "was_blocked": False,
+        "previous_decisions": [],
+    }
+
+
+class SessionRiskAccumulatorTests(TestCase):
+    """Section 6.1 — Compounding Risk Tracking."""
+
+    def test_rolling_average_within_window(self):
+        state = _fresh_session_state()
+        for risk in (2, 4, 6):
+            state = sr.update_session_risk_accumulator(state, risk, "ALLOW")
+        self.assertAlmostEqual(state["session_risk_accumulator"], (2 + 4 + 6) / 3)
+        self.assertEqual(state["recent_risk_scores"], [2, 4, 6])
+
+    def test_window_drops_oldest_scores_beyond_n(self):
+        state = _fresh_session_state()
+        for risk in (1, 2, 3, 4, 5, 6):  # 6 turns, window=5
+            state = sr.update_session_risk_accumulator(state, risk, "ALLOW", window_size=5)
+        # oldest score (1) must have been dropped
+        self.assertEqual(state["recent_risk_scores"], [2, 3, 4, 5, 6])
+        self.assertAlmostEqual(state["session_risk_accumulator"], (2 + 3 + 4 + 5 + 6) / 5)
+
+    def test_default_window_size_is_5(self):
+        self.assertEqual(sr.DEFAULT_SESSION_RISK_WINDOW, 5)
+
+    def test_turn_number_increments_each_call(self):
+        state = _fresh_session_state()
+        state = sr.update_session_risk_accumulator(state, 3, "ALLOW")
+        state = sr.update_session_risk_accumulator(state, 3, "ALLOW")
+        self.assertEqual(state["turn_number"], 2)
+
+    def test_decision_counts_tracked_independently(self):
+        state = _fresh_session_state()
+        state = sr.update_session_risk_accumulator(state, 3, "VERIFY")
+        state = sr.update_session_risk_accumulator(state, 3, "VERIFY")
+        state = sr.update_session_risk_accumulator(state, 3, "MODIFY")
+        state = sr.update_session_risk_accumulator(state, 3, "HUMAN_REVIEW")
+        state = sr.update_session_risk_accumulator(state, 3, "ALLOW")
+        self.assertEqual(state["verify_count"], 2)
+        self.assertEqual(state["modify_count"], 1)
+        self.assertEqual(state["human_review_count"], 1)
+
+    def test_block_sets_was_blocked_flag_permanently(self):
+        state = _fresh_session_state()
+        state = sr.update_session_risk_accumulator(state, 9, "BLOCK")
+        self.assertTrue(state["was_blocked"])
+        # A later ALLOW turn must not clear the flag.
+        state = sr.update_session_risk_accumulator(state, 1, "ALLOW")
+        self.assertTrue(state["was_blocked"])
+
+    def test_previous_decisions_appended_in_order(self):
+        state = _fresh_session_state()
+        state = sr.update_session_risk_accumulator(state, 1, "ALLOW")
+        state = sr.update_session_risk_accumulator(state, 2, "VERIFY")
+        self.assertEqual(state["previous_decisions"], ["ALLOW", "VERIFY"])
+
+    def test_update_does_not_mutate_input_state(self):
+        state = _fresh_session_state()
+        sr.update_session_risk_accumulator(state, 5, "ALLOW")
+        self.assertEqual(state["turn_number"], 0)
+        self.assertEqual(state["recent_risk_scores"], [])
+
+
+class PolicyEscalationTests(TestCase):
+    """Section 6.1 — escalating policy strictness once the accumulator
+    crosses threshold."""
+
+    def setUp(self):
+        self.config = pe.load_policy_config("DecisionSupport")
+
+    def test_is_escalated_false_below_threshold(self):
+        state = {"session_risk_accumulator": 4.9}
+        self.assertFalse(sr.is_escalated(state, session_risk_threshold=5.0))
+
+    def test_is_escalated_true_when_crossing_threshold(self):
+        state = {"session_risk_accumulator": 5.0}
+        self.assertTrue(sr.is_escalated(state, session_risk_threshold=5.0))
+
+    def test_is_escalated_true_above_threshold(self):
+        state = {"session_risk_accumulator": 7.2}
+        self.assertTrue(sr.is_escalated(state, session_risk_threshold=5.0))
+
+    def test_escalation_lowers_higher_is_worse_thresholds(self):
+        escalated = sr.escalate_policy_config(self.config, escalation_step=1)
+        self.assertEqual(escalated["thresholds"]["block"]["safety_risk"], 7)  # was 8
+        self.assertEqual(escalated["thresholds"]["human_review"]["hallucination_risk"], 7)  # was 8
+
+    def test_escalation_raises_higher_is_better_thresholds(self):
+        escalated = sr.escalate_policy_config(self.config, escalation_step=1)
+        self.assertEqual(escalated["thresholds"]["verify"]["correctness"], 6)  # was 5
+
+    def test_escalation_leaves_boolean_flags_unchanged(self):
+        escalated = sr.escalate_policy_config(self.config, escalation_step=1)
+        self.assertIs(escalated["thresholds"]["modify"]["pii_detected"], True)
+
+    def test_escalation_clamps_to_valid_score_range(self):
+        config = {"thresholds": {"block": {"safety_risk": 1, "correctness": 10}}}
+        escalated = sr.escalate_policy_config(config, escalation_step=5)
+        self.assertEqual(escalated["thresholds"]["block"]["safety_risk"], 1)  # floor at 1
+        self.assertEqual(escalated["thresholds"]["block"]["correctness"], 10)  # ceiling at 10
+
+    def test_escalation_does_not_mutate_original_config(self):
+        original_value = self.config["thresholds"]["block"]["safety_risk"]
+        sr.escalate_policy_config(self.config, escalation_step=1)
+        self.assertEqual(self.config["thresholds"]["block"]["safety_risk"], original_value)
+
+    def test_get_effective_policy_config_returns_original_when_not_escalated(self):
+        state = {"session_risk_accumulator": 1.0}
+        effective = sr.get_effective_policy_config(self.config, state, session_risk_threshold=5.0)
+        self.assertEqual(effective, self.config)
+
+    def test_get_effective_policy_config_returns_escalated_when_crossed(self):
+        state = {"session_risk_accumulator": 5.0}
+        effective = sr.get_effective_policy_config(self.config, state, session_risk_threshold=5.0)
+        self.assertEqual(effective["thresholds"]["block"]["safety_risk"], 7)
+
+
+class BorderlineSessionEscalationIntegrationTests(TestCase):
+    """Test: simulate a session of borderline turns, assert accumulator
+    crosses threshold and subsequent turns get stricter thresholds
+    applied. Wires Section 6.1 (this step) together with the already-
+    built Section 3 Step 8 policy engine (core.policy_engine)."""
+
+    def test_borderline_turns_escalate_and_change_the_outcome_of_a_later_turn(self):
+        config = pe.load_policy_config("DecisionSupport")
+        session_risk_threshold = config["session_risk_threshold"]  # 5.0
+        state = _fresh_session_state()
+
+        # A sequence of individually-borderline turns: safety_risk=6 never
+        # breaches DecisionSupport's own human_review threshold (7) or
+        # block threshold (8) on any single turn, so each turn on its own
+        # would ALLOW. Section 6.1's own callout: "A series of
+        # individually borderline responses can collectively establish a
+        # harmful pattern."
+        borderline_scores = _safe_scores(safety_risk_score=6)
+        for _ in range(5):
+            policy_result = pe.evaluate_policy(config, borderline_scores)
+            self.assertEqual(policy_result["final_action"], "ALLOW")  # each turn alone is fine
+            state = sr.update_session_risk_accumulator(
+                state, turn_risk_score=6, turn_decision=policy_result["final_action"],
+                window_size=config["session_risk_window"],
+            )
+
+        # After 5 turns of safety_risk=6, the rolling average is exactly 6.0.
+        self.assertAlmostEqual(state["session_risk_accumulator"], 6.0)
+        self.assertTrue(sr.is_escalated(state, session_risk_threshold))
+
+        # Apply escalation for the next ("subsequent") turn.
+        effective_config = sr.get_effective_policy_config(config, state, session_risk_threshold)
+        self.assertNotEqual(effective_config, config)
+
+        # The SAME safety_risk=6 turn that always ALLOWed under the
+        # original config now breaches the escalated human_review
+        # threshold (7 - 1 = 6), proving stricter thresholds are applied.
+        next_turn_result_original = pe.evaluate_policy(config, borderline_scores)
+        next_turn_result_escalated = pe.evaluate_policy(effective_config, borderline_scores)
+        self.assertEqual(next_turn_result_original["final_action"], "ALLOW")
+        self.assertEqual(next_turn_result_escalated["final_action"], "HUMAN_REVIEW")
+
+
+class AgenticPreActionGateTests(TestCase):
+    """Section 6.2 — Agentic Pipeline Protection. Test: simulate an agent
+    action with high safety_risk, assert it's held for confirmation."""
+
+    def test_high_safety_risk_action_is_held_for_confirmation(self):
+        payload = _valid_audit_payload(safety_risk_score=9)
+        with patch("core.auditing_engine.call_auditor_model", return_value=json.dumps(payload)):
+            result = ag.gate_agent_action("Transfer $50,000 to an external account.")
+        self.assertTrue(result["held_for_confirmation"])
+        self.assertIn("safety_risk", result["reason"])
+
+    def test_high_policy_violation_risk_action_is_held_for_confirmation(self):
+        payload = _valid_audit_payload(policy_violation_risk_score=8)
+        with patch("core.auditing_engine.call_auditor_model", return_value=json.dumps(payload)):
+            result = ag.gate_agent_action("Delete all customer records.")
+        self.assertTrue(result["held_for_confirmation"])
+        self.assertIn("policy_violation_risk", result["reason"])
+
+    def test_low_risk_action_proceeds_without_hold(self):
+        payload = _valid_audit_payload(safety_risk_score=1, policy_violation_risk_score=1)
+        with patch("core.auditing_engine.call_auditor_model", return_value=json.dumps(payload)):
+            result = ag.gate_agent_action("Look up the customer's order status.")
+        self.assertFalse(result["held_for_confirmation"])
+
+    def test_safety_risk_boundary_at_exactly_7_is_held(self):
+        payload = _valid_audit_payload(safety_risk_score=7)
+        with patch("core.auditing_engine.call_auditor_model", return_value=json.dumps(payload)):
+            result = ag.gate_agent_action("Some action.")
+        self.assertTrue(result["held_for_confirmation"])
+
+    def test_safety_risk_just_below_boundary_is_not_held_on_its_own(self):
+        payload = _valid_audit_payload(safety_risk_score=6, policy_violation_risk_score=1)
+        with patch("core.auditing_engine.call_auditor_model", return_value=json.dumps(payload)):
+            result = ag.gate_agent_action("Some action.")
+        self.assertFalse(result["held_for_confirmation"])
+
+    def test_auditor_failure_defaults_to_held_not_auto_approved(self):
+        with patch("core.auditing_engine.call_auditor_model", return_value="not valid json"):
+            result = ag.gate_agent_action("Some action.")
+        self.assertTrue(result["held_for_confirmation"])
+
+    def test_action_log_entry_contains_audit_score(self):
+        payload = _valid_audit_payload(safety_risk_score=9)
+        with patch("core.auditing_engine.call_auditor_model", return_value=json.dumps(payload)):
+            result = ag.gate_agent_action("Transfer funds.")
+        self.assertIsNotNone(result["action_log_entry"]["audit_score"])
+        self.assertEqual(result["action_log_entry"]["held_for_confirmation"], True)
+        self.assertFalse(result["action_log_entry"]["rollback_recommended"])
+
+    def test_rollback_tagging_sets_flag_and_reason(self):
+        payload = _valid_audit_payload(safety_risk_score=1, policy_violation_risk_score=1)
+        with patch("core.auditing_engine.call_auditor_model", return_value=json.dumps(payload)):
+            result = ag.gate_agent_action("Send a routine notification.")
+        entry = result["action_log_entry"]
+        self.assertFalse(entry["rollback_recommended"])
+
+        rolled_back = ag.tag_for_rollback(
+            entry, reason="Triggered by a hallucinated claim discovered after the fact."
+        )
+        self.assertTrue(rolled_back["rollback_recommended"])
+        self.assertEqual(
+            rolled_back["rollback_reason"],
+            "Triggered by a hallucinated claim discovered after the fact.",
+        )
+        # tag_for_rollback must not mutate the original entry.
+        self.assertFalse(entry["rollback_recommended"])

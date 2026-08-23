@@ -24,3 +24,8 @@ thresholds:
 max_retries: 2
 latency_budget_ms: 10000
 require_human_review_for_final_block: false
+# session_risk_window's default of 5 is doc-grounded (Section 6.1:
+# "default N = 5"); session_risk_threshold is an illustrative placeholder
+# (see CustomerSupport.yaml's header note).
+session_risk_window: 5
+session_risk_threshold: 5.5

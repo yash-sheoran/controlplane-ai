@@ -167,6 +167,13 @@ class SessionState(models.Model):
     turn_number = models.PositiveIntegerField(default=0)
     session_risk_accumulator = models.FloatField(default=0.0)
 
+    # Section 6.1: "Rolling average of risk scores across the last N
+    # turns (configurable, default N = 5)." A true rolling average needs
+    # the recent history itself, not just the running scalar average, so
+    # this stores the last N per-turn risk scores that
+    # session_risk_accumulator was computed from.
+    recent_risk_scores = models.JSONField(default=list, blank=True)
+
     # Section 6.1: "Count of VERIFY, MODIFY, and HUMAN_REVIEW decisions in the
     # current session."
     verify_count = models.PositiveIntegerField(default=0)

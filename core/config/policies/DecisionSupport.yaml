@@ -39,3 +39,9 @@ thresholds:
 max_retries: 2
 latency_budget_ms: 8000
 require_human_review_for_final_block: true
+# Section 14.2 schema fields, not exercised until Section 6.1 (Step 8):
+# session_risk_window's default of 5 is doc-grounded ("default N = 5");
+# session_risk_threshold has no concrete value anywhere in the document —
+# this is an illustrative placeholder, not sourced from it.
+session_risk_window: 5
+session_risk_threshold: 5.0
