@@ -1,0 +1,18 @@
+# Section 5.2: "EU AI Act: High-risk AI system classification tagging;
+# human oversight mandatory for high-risk outputs; conformity logging."
+# Section 8.2 adds: mandatory human oversight on HUMAN_REVIEW decisions,
+# conformity logging, bias monitoring, extended audit retention. No
+# version string is given anywhere in the document for this regulation —
+# "2024-Q3" below is an illustrative placeholder.
+regulation_id: EU_AI_Act
+version: "2024-Q3"
+requires_pii_pseudonymisation: false
+data_residency_required: false
+high_risk_classification_tagging: true
+human_oversight_mandatory_for_high_risk: true
+conformity_logging: true
+# Section 10.3: audit retention is "minimum 90 days, up to 7 years for
+# regulated industries" — 7 years is the doc-grounded upper bound used
+# here for high-risk-classified use cases.
+high_risk_audit_retention_days: 2555
+breach_notification_hours: null

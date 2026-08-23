@@ -3,12 +3,10 @@
 Implements all five decision paths: ALLOW, VERIFY/RETRY, MODIFY,
 HUMAN_REVIEW, BLOCK.
 
-Standalone, independently tested module — not yet wired into the request
-pipeline, for the same reason as the other pipeline modules: this project's
-10-step plan puts the live Human Review Interface / dashboard and the
-full end-to-end pipeline wiring in later, dedicated steps. This module
-provides the correct decision-execution *logic*; persisting a real,
-queryable human-review queue belongs with that dashboard step.
+Independently unit-tested and, since this project's Step 10, composed
+live in core/pipeline.py. The queryable human-review queue and reviewer
+UI live in core/dashboard_views.py (Step 9), which persists this
+module's queued_case dict into AuditRecord.human_review.
 """
 
 from cryptography.fernet import Fernet

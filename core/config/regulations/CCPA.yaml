@@ -1,0 +1,13 @@
+# Section 5.2: "CCPA (California): Opt-out flag support; sale/sharing
+# prohibition check; data categories logging." No version string is given
+# anywhere in the document for this regulation (unlike GDPR/DPDP, whose
+# versions come from Section 14.1's own example) — "2024-Q1" below is an
+# illustrative placeholder, not a document-sourced value.
+regulation_id: CCPA
+version: "2024-Q1"
+requires_pii_pseudonymisation: false
+data_residency_required: false
+opt_out_flag_support: true
+sale_sharing_prohibition_check: true
+data_categories_logging: true
+breach_notification_hours: null

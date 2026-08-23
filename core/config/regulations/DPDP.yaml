@@ -1,0 +1,10 @@
+# Section 5.2: "DPDP (India): Consent validation for sensitive personal
+# data; data residency flag; purpose limitation check." Version string
+# "2024-Q2" is taken directly from Section 14.1's own example.
+regulation_id: DPDP
+version: "2024-Q2"
+requires_pii_pseudonymisation: false
+data_residency_required: true
+consent_validation_required: true
+purpose_limitation_check: true
+breach_notification_hours: null

@@ -13,6 +13,7 @@ from . import decision_executor as de
 from . import model_pipeline as mp
 from . import policy_engine as pe
 from . import pre_request_analysis as pra
+from . import regulation_library as rl
 from . import session_risk as sr
 from .models import (
     AuditRecord,
@@ -165,10 +166,16 @@ class RequestIngestionAPITests(TestCase):
 
     # --- Success path -----------------------------------------------------
 
-    def test_valid_request_creates_open_trace_with_correct_fields(self):
+    def test_valid_request_creates_trace_and_runs_the_full_pipeline(self):
+        """This project's Step 10: /api/requests/ now runs the full
+        pipeline (Steps 2-9), so a successful request closes the trace
+        with a real final_decision rather than leaving it OPEN — the
+        contract Step 2 originally tested, before those later steps
+        existed to wire in. With the default stub's "no issues" scores,
+        this deterministically resolves to ALLOW."""
         response = self.post(self.valid_payload)
 
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(Trace.objects.count(), 1)
 
         trace = Trace.objects.get()
@@ -177,8 +184,13 @@ class RequestIngestionAPITests(TestCase):
         self.assertEqual(str(trace.session_id), self.session_id)
         self.assertEqual(trace.use_case, self.use_case)
         self.assertEqual(trace.client_metadata, {"channel": "web"})
-        self.assertEqual(trace.status, Trace.STATUS_OPEN)
-        self.assertIsNone(trace.final_decision)
+        self.assertEqual(trace.status, Trace.STATUS_CLOSED)
+        self.assertEqual(trace.final_decision, "ALLOW")
+
+        audit_record = AuditRecord.objects.get(trace=trace)
+        self.assertEqual(audit_record.final_action, "ALLOW")
+        self.assertTrue(audit_record.audit_quality)
+        self.assertTrue(audit_record.audit_responsibility)
 
     def test_response_body_contains_request_id_status_and_timestamp(self):
         response = self.post(self.valid_payload)
@@ -187,7 +199,8 @@ class RequestIngestionAPITests(TestCase):
         trace = Trace.objects.get()
         self.assertEqual(body["request_id"], str(trace.request_id))
         self.assertEqual(body["session_id"], self.session_id)
-        self.assertEqual(body["status"], "OPEN")
+        self.assertEqual(body["status"], "ALLOW")
+        self.assertIn("message", body)
         self.assertIn("timestamp", body)
         # request_id must be a valid UUID v4 (Section 3 Step 1 Outputs).
         parsed = uuid.UUID(body["request_id"])
@@ -198,7 +211,7 @@ class RequestIngestionAPITests(TestCase):
         del payload["client_metadata"]
         response = self.post(payload)
 
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 200)
         trace = Trace.objects.get()
         self.assertEqual(trace.client_metadata, {})
 
@@ -2084,3 +2097,296 @@ class ThumbsDownViewTests(TestCase):
     def test_thumbs_down_for_unknown_trace_returns_404(self):
         response = self.client.post(f"/api/feedback/{uuid.uuid4()}/thumbs-down/")
         self.assertEqual(response.status_code, 404)
+
+
+class RegulationLibraryTests(TestCase):
+    """Section 8 — Regulatory & Geography-Aware Compliance Module."""
+
+    def test_gdpr_and_dpdp_versions_match_the_appendix_example(self):
+        # Section 14.1's own example: "regulation_versions": {"GDPR":
+        # "2024-Q4", "DPDP": "2024-Q2"}.
+        self.assertEqual(rl.load_regulation("GDPR")["version"], "2024-Q4")
+        self.assertEqual(rl.load_regulation("DPDP")["version"], "2024-Q2")
+
+    def test_all_five_named_regulations_load(self):
+        for reg_id in ("GDPR", "DPDP", "CCPA", "EU_AI_Act", "HIPAA"):
+            with self.subTest(regulation=reg_id):
+                reg = rl.load_regulation(reg_id)
+                self.assertEqual(reg["regulation_id"], reg_id)
+
+    def test_gdpr_breach_notification_hours_is_72(self):
+        # Section 5.2: "72h breach notification hook."
+        self.assertEqual(rl.load_regulation("GDPR")["breach_notification_hours"], 72)
+
+    def test_apply_regulations_aggregates_versions(self):
+        result = rl.apply_regulations(["GDPR", "DPDP"])
+        self.assertEqual(result["regulation_versions"], {"GDPR": "2024-Q4", "DPDP": "2024-Q2"})
+
+    def test_apply_regulations_requires_pseudonymisation_if_any_regulation_does(self):
+        # GDPR requires it, DPDP does not.
+        result = rl.apply_regulations(["DPDP"])
+        self.assertFalse(result["requires_pii_pseudonymisation"])
+        result = rl.apply_regulations(["GDPR", "DPDP"])
+        self.assertTrue(result["requires_pii_pseudonymisation"])
+
+    def test_apply_regulations_data_residency_required_if_any_regulation_does(self):
+        result = rl.apply_regulations(["GDPR"])
+        self.assertFalse(result["data_residency_required"])
+        result = rl.apply_regulations(["GDPR", "DPDP"])
+        self.assertTrue(result["data_residency_required"])  # DPDP requires it
+
+    def test_apply_regulations_breach_notification_takes_the_strictest_window(self):
+        result = rl.apply_regulations(["GDPR"])
+        self.assertEqual(result["breach_notification_hours"], 72)
+
+    def test_apply_regulations_with_no_regulations_is_a_safe_no_op(self):
+        result = rl.apply_regulations([])
+        self.assertEqual(result["regulation_versions"], {})
+        self.assertFalse(result["requires_pii_pseudonymisation"])
+        self.assertIsNone(result["breach_notification_hours"])
+
+    def test_build_compliance_metadata_for_non_high_risk_use_case(self):
+        metadata = rl.build_compliance_metadata(["GDPR"], eu_ai_act_high_risk=False, base_audit_retention_days=90)
+        self.assertEqual(metadata["effective_audit_retention_days"], 90)
+        self.assertIsNone(metadata["conformity_log"])
+        self.assertFalse(metadata["eu_ai_act_high_risk"])
+
+    def test_build_compliance_metadata_extends_retention_for_high_risk_use_case(self):
+        metadata = rl.build_compliance_metadata(["GDPR", "EU_AI_Act"], eu_ai_act_high_risk=True, base_audit_retention_days=90)
+        # Section 10.3: "up to 7 years for regulated industries" = 2555 days.
+        self.assertEqual(metadata["effective_audit_retention_days"], 2555)
+        self.assertIsNotNone(metadata["conformity_log"])
+        self.assertTrue(metadata["conformity_log"]["human_oversight_mandatory_for_human_review"])
+
+    def test_build_compliance_metadata_does_not_extend_retention_if_already_longer(self):
+        metadata = rl.build_compliance_metadata(["EU_AI_Act"], eu_ai_act_high_risk=True, base_audit_retention_days=3000)
+        self.assertEqual(metadata["effective_audit_retention_days"], 3000)
+
+    def test_high_risk_flag_extends_retention_even_when_eu_ai_act_not_in_regulations_list(self):
+        """The eu_ai_act_high_risk flag governs its own consequence
+        directly from the EU_AI_Act regulation file — it must not
+        require "EU_AI_Act" to be separately listed in `regulations`."""
+        metadata = rl.build_compliance_metadata(["GDPR", "DPDP"], eu_ai_act_high_risk=True, base_audit_retention_days=90)
+        self.assertEqual(metadata["effective_audit_retention_days"], 2555)
+
+
+def _trigger_values_for(config):
+    """Computes, from a use-case's own loaded policy config, score values
+    that breach exactly one specific bucket without also breaching a
+    higher-priority one — used by the end-to-end scenario tests below so
+    they adapt to whatever the actual YAML thresholds are, rather than
+    relying on hand-copied magic numbers per use case."""
+    t = config["thresholds"]
+    return {
+        "human_review_safety_risk": min(t["human_review"]["safety_risk"], t["block"]["safety_risk"] - 1),
+        "verify_hallucination_risk": min(
+            t["verify"]["hallucination_risk"], t["human_review"]["hallucination_risk"] - 1
+        ),
+    }
+
+
+def _all_clear_audit_payload(**overrides):
+    """Unlike _valid_audit_payload's uniform baseline of 5 (deliberately
+    ambiguous for auditing_engine's own field-presence/range tests), this
+    is a genuinely safe baseline for every dimension — quality dimensions
+    at 9 (higher = better), risk dimensions at 1 (higher = worse) — so it
+    never accidentally breaches any use case's policy thresholds. A
+    uniform 5 does breach some real configs here, e.g. InternalKnowledge
+    and DecisionSupport's modify.data_leakage_risk threshold of 5."""
+    payload = {}
+    for dim in pe.HIGHER_IS_BETTER:
+        payload[f"{dim}_score"] = 9
+        payload[f"{dim}_reason"] = f"Simulated: no issues with {dim}."
+    for dim in pe.HIGHER_IS_WORSE:
+        payload[f"{dim}_score"] = 1
+        payload[f"{dim}_reason"] = f"Simulated: no issues with {dim}."
+    payload["recommended_action"] = "ALLOW"
+    payload.update(overrides)
+    return payload
+
+
+class EndToEndPipelineScenarioTests(TestCase):
+    """Step 10 'Prove it works': sample scenarios covering all 5 decision
+    paths x 3 use-case profiles, run through the real, now-wired
+    /api/requests/ endpoint. Test: assert both the expected final
+    decision and a complete, correctly-populated audit record."""
+
+    USE_CASES = ["CustomerSupport", "InternalKnowledge", "DecisionSupport"]
+
+    def setUp(self):
+        for use_case_id in self.USE_CASES:
+            UseCaseProfile.objects.get_or_create(use_case_id=use_case_id, defaults={"name": use_case_id})
+
+    def _post(self, use_case_id, raw_prompt):
+        return self.client.post(
+            "/api/requests/",
+            data=json.dumps({
+                "raw_prompt": raw_prompt,
+                "user_id": "scenario-user",
+                "session_id": str(uuid.uuid4()),
+                "use_case_id": use_case_id,
+            }),
+            content_type="application/json",
+        )
+
+    def _assert_complete_audit_record(self, request_id, expected_final_action):
+        record = AuditRecord.objects.get(trace_id=request_id)
+        self.assertEqual(record.final_action, expected_final_action)
+        self.assertIn("complexity_score", record.pre_request)
+        self.assertIn("risk_score", record.pre_request)
+        self.assertTrue(record.policy_rules_evaluated)
+        self.assertTrue(record.policy_profile_version)
+        return record
+
+    def test_allow_scenario_for_every_use_case(self):
+        for use_case_id in self.USE_CASES:
+            with self.subTest(use_case=use_case_id):
+                response = self._post(use_case_id, "What are your business hours?")
+                self.assertEqual(response.status_code, 200)
+                body = response.json()
+                self.assertEqual(body["status"], "ALLOW")
+                record = self._assert_complete_audit_record(body["request_id"], "ALLOW")
+                self.assertTrue(record.response_metrics)
+                self.assertTrue(record.audit_quality)
+                self.assertTrue(record.audit_responsibility)
+
+    def test_block_via_router_pre_check_for_every_use_case(self):
+        # Section 3 Step 2, 2C's own Critical-band example content, which
+        # pre_request_analysis.risk_score scores at 9 regardless of use
+        # case, triggering Section 3 Step 3's router pre-check BLOCK
+        # before any model call.
+        prompt = "This is a regulated decision affecting a safety-critical hospital system."
+        for use_case_id in self.USE_CASES:
+            with self.subTest(use_case=use_case_id):
+                response = self._post(use_case_id, prompt)
+                self.assertEqual(response.status_code, 200)
+                body = response.json()
+                self.assertEqual(body["status"], "BLOCK")
+                self.assertEqual(body["message"], de.SAFE_BLOCK_MESSAGE)
+                record = self._assert_complete_audit_record(body["request_id"], "BLOCK")
+                self.assertEqual(record.policy_rules_triggered, ["ROUTER_PRE_CHECK:risk_score"])
+                self.assertEqual(record.response_metrics, {})  # no model call was made
+
+    def test_modify_via_pii_detection_for_every_use_case(self):
+        # MODIFY's redaction target is the model's *response* text
+        # (Section 3 Step 9 MODIFY: "The response is passed to a
+        # redaction/modification module"), not the original user prompt —
+        # the simulated stub response never echoes the prompt's PII back,
+        # so this only asserts the correct path fired and the modification
+        # log is present, not a redacted placeholder in this stub's reply.
+        prompt = "Please update my contact email to john.smith@example.com."
+        for use_case_id in self.USE_CASES:
+            with self.subTest(use_case=use_case_id):
+                response = self._post(use_case_id, prompt)
+                self.assertEqual(response.status_code, 200)
+                body = response.json()
+                self.assertEqual(body["status"], "MODIFY")
+                record = self._assert_complete_audit_record(body["request_id"], "MODIFY")
+                self.assertIn("original_content_encrypted", record.modification)
+
+    def test_human_review_via_audit_score_for_every_use_case(self):
+        for use_case_id in self.USE_CASES:
+            with self.subTest(use_case=use_case_id):
+                config = pe.load_policy_config(use_case_id)
+                trigger = _trigger_values_for(config)["human_review_safety_risk"]
+                payload = _all_clear_audit_payload(safety_risk_score=trigger, recommended_action="HUMAN_REVIEW")
+                with patch("core.auditing_engine.call_auditor_model", return_value=json.dumps(payload)):
+                    response = self._post(use_case_id, "Give me guidance on this matter.")
+                self.assertEqual(response.status_code, 202)
+                body = response.json()
+                self.assertEqual(body["status"], "HUMAN_REVIEW")
+                record = self._assert_complete_audit_record(body["request_id"], "HUMAN_REVIEW")
+                self.assertEqual(record.human_review_status, "PENDING")
+                self.assertIsNotNone(record.human_review)
+
+    def test_verify_then_retry_succeeds_to_allow_for_every_use_case(self):
+        for use_case_id in self.USE_CASES:
+            with self.subTest(use_case=use_case_id):
+                config = pe.load_policy_config(use_case_id)
+                trigger = _trigger_values_for(config)["verify_hallucination_risk"]
+                bad_payload = _all_clear_audit_payload(hallucination_risk_score=trigger, recommended_action="VERIFY")
+                good_payload = _all_clear_audit_payload(recommended_action="ALLOW")
+                with patch(
+                    "core.auditing_engine.call_auditor_model",
+                    side_effect=[json.dumps(bad_payload), json.dumps(good_payload)],
+                ):
+                    response = self._post(use_case_id, "Summarise this document for me.")
+                self.assertEqual(response.status_code, 200)
+                body = response.json()
+                self.assertEqual(body["status"], "ALLOW")
+                self._assert_complete_audit_record(body["request_id"], "ALLOW")
+
+    def test_verify_exhausted_escalates_to_human_review_for_every_use_case(self):
+        for use_case_id in self.USE_CASES:
+            with self.subTest(use_case=use_case_id):
+                config = pe.load_policy_config(use_case_id)
+                trigger = _trigger_values_for(config)["verify_hallucination_risk"]
+                bad_payload = _all_clear_audit_payload(hallucination_risk_score=trigger, recommended_action="VERIFY")
+                with patch("core.auditing_engine.call_auditor_model", return_value=json.dumps(bad_payload)):
+                    response = self._post(use_case_id, "Summarise this document for me.")
+                self.assertEqual(response.status_code, 202)
+                body = response.json()
+                self.assertEqual(body["status"], "HUMAN_REVIEW")
+                self._assert_complete_audit_record(body["request_id"], "HUMAN_REVIEW")
+
+
+class GeographyRegulationWiringTests(TestCase):
+    """Step 10: geography/regulation rule injection wired by the use
+    case's configured geography, verified end to end through the real
+    endpoint."""
+
+    def setUp(self):
+        self.use_case = UseCaseProfile.objects.create(
+            use_case_id="DecisionSupport", name="Decision Support",
+            geography=["IN", "EU"], regulations=["GDPR", "DPDP"],
+            eu_ai_act_high_risk=True, audit_retention_days=90,
+        )
+
+    def test_audit_record_carries_geography_and_regulation_versions(self):
+        response = self.client.post(
+            "/api/requests/",
+            data=json.dumps({
+                "raw_prompt": "What are your business hours?",
+                "user_id": "u1", "session_id": str(uuid.uuid4()), "use_case_id": "DecisionSupport",
+            }),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        record = AuditRecord.objects.get(trace_id=response.json()["request_id"])
+        self.assertEqual(record.geography, ["IN", "EU"])
+        self.assertEqual(record.regulation_versions, {"GDPR": "2024-Q4", "DPDP": "2024-Q2"})
+        self.assertTrue(record.compliance_metadata["eu_ai_act_high_risk"])
+        self.assertEqual(record.compliance_metadata["effective_audit_retention_days"], 2555)
+        self.assertIsNotNone(record.compliance_metadata["conformity_log"])
+
+
+class SessionRiskEscalationLivePipelineTests(TestCase):
+    """Step 10: session-risk escalation (Step 8) actually applied across
+    real turns through the live endpoint, not just the standalone module
+    test from Step 8."""
+
+    def setUp(self):
+        self.use_case = UseCaseProfile.objects.create(
+            use_case_id="DecisionSupport", name="Decision Support",
+        )
+        self.config = pe.load_policy_config("DecisionSupport")
+
+    def _post(self, session_id, raw_prompt):
+        return self.client.post(
+            "/api/requests/",
+            data=json.dumps({
+                "raw_prompt": raw_prompt, "user_id": "u1",
+                "session_id": session_id, "use_case_id": "DecisionSupport",
+            }),
+            content_type="application/json",
+        )
+
+    def test_session_state_persists_and_accumulates_across_turns(self):
+        session_id = str(uuid.uuid4())
+        self._post(session_id, "What are your business hours?")
+        self._post(session_id, "What are your business hours?")
+
+        session = SessionState.objects.get(session_id=session_id)
+        self.assertEqual(session.turn_number, 2)
+        self.assertEqual(len(session.recent_risk_scores), 2)
+        self.assertEqual(session.previous_decisions, ["ALLOW", "ALLOW"])

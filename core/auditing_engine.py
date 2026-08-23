@@ -7,15 +7,15 @@ recommended_action; on validation failure the system retries once with an
 escalated prompt, defaulting to HUMAN_REVIEW after two consecutive
 failures "to prevent silent failures".
 
-Standalone, independently tested module — not yet wired into the request
-pipeline, for the same reason as core/model_pipeline.py: the Policy Engine
-(a later step) is what actually consumes recommended_action/scores, and
-how a HUMAN_REVIEW fallback here should affect the live request is that
-step's concern, not this one's.
+Independently unit-tested (mocking call_auditor_model) and, since this
+project's Step 10, composed live in core/pipeline.py alongside the model
+router/execution (core/model_pipeline.py) and policy engine
+(core/policy_engine.py).
 """
 
 import json
 
+from . import policy_engine as pe
 from .models import DECISION_CHOICES
 
 # Section 4 — Audit Scoring Framework (All 12 Dimensions), split into the
@@ -100,8 +100,19 @@ def call_auditor_model(prompt):
     raw JSON string (as a real model would, per Section 3 Step 6: "the
     auditing model is instructed to return ONLY valid JSON"). This is the
     seam tests mock to control malformed/out-of-range/well-formed output
-    without a real network call."""
-    scores = {f"{dim}_score": 1 for dim in ALL_DIMENSIONS}
+    without a real network call.
+
+    "No issues detected" means a HIGH score for dimensions that score
+    higher-is-better and a LOW score for dimensions that score
+    higher-is-worse (Section 4). This must use core.policy_engine's
+    HIGHER_IS_WORSE/HIGHER_IS_BETTER direction sets, not this module's own
+    QUALITY_DIMENSIONS/RESPONSIBILITY_DIMENSIONS grouping — those two
+    groupings differ specifically for hallucination_risk, which is
+    grouped under "Quality" for audit-track purposes (Section 2.2
+    Decision 2) but scores like a risk dimension ("High = dangerous").
+    """
+    scores = {f"{dim}_score": 1 for dim in pe.HIGHER_IS_WORSE}
+    scores.update({f"{dim}_score": 9 for dim in pe.HIGHER_IS_BETTER})
     reasons = {f"{dim}_reason": "Simulated auditor: no issues detected." for dim in ALL_DIMENSIONS}
     payload = {**scores, **reasons, "recommended_action": "ALLOW"}
     return json.dumps(payload)

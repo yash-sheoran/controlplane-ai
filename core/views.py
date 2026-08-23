@@ -6,7 +6,16 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from . import pipeline
 from .models import Trace, UseCaseProfile
+
+# Section 3 Step 9's five decision outcomes map to these HTTP statuses:
+# ALLOW/MODIFY/BLOCK are all *successful, complete* responses (BLOCK is a
+# deliberate content decision, not an error), so 200; HUMAN_REVIEW has no
+# final content yet, so 202 Accepted (processing).
+_STATUS_CODE_BY_FINAL_ACTION = {
+    "ALLOW": 200, "MODIFY": 200, "BLOCK": 200, "HUMAN_REVIEW": 202,
+}
 
 
 def health_check(request):
@@ -93,12 +102,26 @@ def create_request(request):
     except Exception:
         return _safe_error_response()
 
+    # This project's Step 10: the trace, already safely committed above,
+    # now runs through the full pipeline (pre-request analysis -> model
+    # router/execution/metrics -> auditing engine -> policy engine with
+    # session-risk escalation -> decision executor). If this stage fails
+    # unexpectedly, the trace is still not lost — it stays OPEN with no
+    # final_decision — but the caller still gets the same safe response
+    # Section 3 Step 1 specifies for any failure in this endpoint.
+    try:
+        result = pipeline.process_request(trace)
+    except Exception:
+        return _safe_error_response()
+
     return JsonResponse(
         {
             "request_id": str(trace.request_id),
             "session_id": str(trace.session_id),
-            "status": trace.status,
+            "status": result["final_action"],
+            "message": result["user_response"],
+            "disclosure_notice": result["disclosure_notice"],
             "timestamp": trace.timestamp.isoformat(),
         },
-        status=201,
+        status=_STATUS_CODE_BY_FINAL_ACTION.get(result["final_action"], 200),
     )

@@ -1,0 +1,11 @@
+# Section 5.2: "HIPAA (Healthcare): PHI detection and mandatory
+# redaction; minimum necessary principle enforcement." No version string
+# is given anywhere in the document for this regulation — "2024-Q1"
+# below is an illustrative placeholder.
+regulation_id: HIPAA
+version: "2024-Q1"
+requires_pii_pseudonymisation: false
+data_residency_required: false
+phi_detection_and_redaction_required: true
+minimum_necessary_principle_enforcement: true
+breach_notification_hours: null

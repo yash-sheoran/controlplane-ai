@@ -3,12 +3,9 @@
 2A PII & Sensitive Content Scan, 2B Complexity Score, 2C Risk Score,
 2D Use-Case Classification.
 
-This module is intentionally a standalone, independently-testable service —
-it is not yet wired into the request-ingestion endpoint (Step 1). The
-complexity/risk scores it produces are documented inputs to the Step 3
-Model Router's routing table (Section 3 Step 3), so wiring this analysis
-into the live request flow belongs with that step, which is the first
-point the scores are actually consumed.
+Independently unit-tested and, since this project's Step 10, composed
+live in core/pipeline.py, where its complexity/risk scores feed the
+Step 3 Model Router (core/model_pipeline.py).
 """
 
 from functools import lru_cache

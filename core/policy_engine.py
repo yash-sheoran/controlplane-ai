@@ -5,10 +5,9 @@ Deterministic, per-use-case threshold rules loaded from YAML policy
 files, evaluated in the doc's fixed priority order: BLOCK, then
 HUMAN_REVIEW, then MODIFY, then VERIFY, else ALLOW.
 
-Standalone, independently tested module — not yet wired into the request
-pipeline, for the same reason as the other pipeline modules: the Decision
-Executor (a later step) is what actually acts on final_action, and how
-this module's output feeds AuditRecord.policy is that step's concern.
+Independently unit-tested and, since this project's Step 10, composed
+live in core/pipeline.py, which dispatches its final_action to
+core/decision_executor.py.
 """
 
 from pathlib import Path

@@ -1,0 +1,10 @@
+# Section 5.2 Geography-Aware Rule Injection: "GDPR (EU): Automatic PII
+# pseudonymisation in prompts; right-to-explanation logging; 72h breach
+# notification hook." Version string "2024-Q4" is taken directly from
+# Section 14.1's own example ("regulation_versions": {"GDPR": "2024-Q4", ...}).
+regulation_id: GDPR
+version: "2024-Q4"
+requires_pii_pseudonymisation: true
+data_residency_required: false
+right_to_explanation_logging: true
+breach_notification_hours: 72

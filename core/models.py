@@ -50,6 +50,14 @@ class UseCaseProfile(models.Model):
     # for regulated industries."
     audit_retention_days = models.PositiveIntegerField(default=90)
 
+    # Section 8.2: "The system classifies each use-case profile against
+    # the EU AI Act Annex III high-risk categories." The document
+    # references these categories without enumerating them or giving a
+    # concrete classification rule, so this is an explicit configuration
+    # decision an operator makes for each use case, not something this
+    # system infers from the prompt or from geography.
+    eu_ai_act_high_risk = models.BooleanField(default=False)
+
     is_active = models.BooleanField(default=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -217,6 +225,12 @@ class AuditRecord(models.Model):
     # regulatory audits.")
     geography = models.JSONField(default=list, blank=True)
     regulation_versions = models.JSONField(default=dict, blank=True)
+
+    # Section 8 — Regulatory & Geography-Aware Compliance Module: the
+    # aggregated regulation-library flags and, for EU AI Act high-risk
+    # use cases, the Section 8.2 conformity log and extended retention
+    # period (core.regulation_library.build_compliance_metadata).
+    compliance_metadata = models.JSONField(default=dict, blank=True)
 
     # Section 3 Step 2 (2A/2B/2C/2D) pre-request analysis block.
     pre_request = models.JSONField(default=dict, blank=True)

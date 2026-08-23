@@ -1,13 +1,8 @@
 """Section 3 Step 3 — Model Router, Step 4 — AI Model Execution,
 Step 5 — Objective Metrics Collection.
 
-Like core/pre_request_analysis.py, this is a standalone, independently
-tested module — not yet wired into the request-ingestion endpoint. Doing
-so now would require inventing behaviour for the Step 3 pre-check BLOCK
-outcome and for how these results get persisted, both of which are the
-Auditing Engine's and Decision Executor's explicit, separate concerns
-(later steps). Wiring it in now would mean redoing that wiring once those
-steps exist, so it is deferred.
+Independently unit-tested (mocking call_generating_model) and, since this
+project's Step 10, composed live in core/pipeline.py.
 """
 
 import json
