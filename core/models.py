@@ -257,9 +257,111 @@ class AuditRecord(models.Model):
     modification = models.JSONField(blank=True, null=True)
     human_review = models.JSONField(blank=True, null=True)
 
+    # Denormalised from human_review's "status" key (Section 3 Step 9
+    # HUMAN_REVIEW: queued case status) purely so the Section 10.1 "Active
+    # Human Review Queue" count and the queue list view (Section 9 Step 9
+    # dashboard) can filter/query efficiently without a JSON path lookup.
+    HUMAN_REVIEW_STATUS_CHOICES = [("PENDING", "Pending"), ("DECIDED", "Decided")]
+    human_review_status = models.CharField(
+        max_length=10, choices=HUMAN_REVIEW_STATUS_CHOICES, blank=True, null=True
+    )
+
     # Section 14.1: final content returned to the user (de-pseudonymised) plus
     # any disclosure notice.
     user_response = models.JSONField(blank=True, null=True)
 
     def __str__(self):
         return f"AuditRecord({self.trace_id})"
+
+
+class ReviewerAction(models.Model):
+    """Section 7.1 Human Reviewer Actions: "When a reviewer approves/
+    modifies/rejects a HUMAN_REVIEW case, the decision and rationale are
+    logged as a gold-standard label against the original audit scores."
+    One row per reviewer action (append-only event log), distinct from
+    AuditRecord.human_review which holds the current queued-case state."""
+
+    REVIEWER_DECISION_CHOICES = [
+        ("APPROVE", "Approve"), ("MODIFY", "Modify"), ("REJECT", "Reject"),
+    ]
+
+    audit_record = models.ForeignKey(
+        AuditRecord, on_delete=models.CASCADE, related_name="reviewer_actions"
+    )
+    reviewer_id = models.CharField(max_length=200)
+    decision = models.CharField(max_length=10, choices=REVIEWER_DECISION_CHOICES)
+    decision_reason = models.TextField(blank=True)
+    modified_response = models.TextField(blank=True)
+    decided_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-decided_at"]
+
+    def __str__(self):
+        return f"ReviewerAction({self.audit_record_id}, {self.decision})"
+
+
+class UserFeedback(models.Model):
+    """Section 7.1 User Thumbs-Down: "A lightweight user-facing feedback
+    mechanism captures explicit dissatisfaction. These are flagged for
+    reviewer attention." """
+
+    trace = models.ForeignKey(Trace, on_delete=models.CASCADE, related_name="feedback_entries")
+    comment = models.TextField(blank=True)
+    reviewed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"UserFeedback({self.trace_id})"
+
+
+class FalsePositiveReport(models.Model):
+    """Section 7.1 False Positive Reports: "Operators can mark a flagged
+    case as a false positive. These are accumulated to trigger threshold
+    recalibration." """
+
+    audit_record = models.ForeignKey(
+        AuditRecord, on_delete=models.CASCADE, related_name="false_positive_reports"
+    )
+    dimension = models.CharField(max_length=50)
+    reported_by = models.CharField(max_length=200)
+    reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"FalsePositiveReport({self.audit_record_id}, {self.dimension})"
+
+
+class ThresholdChangeProposal(models.Model):
+    """Section 9.3: "One-click threshold proposal that routes to admin
+    approval workflow." Section 7.2: "A calibration review produces a
+    recommended threshold adjustment that must be approved by an
+    administrator before taking effect. All threshold changes are
+    versioned and auditable." Approval/rejection is done through the
+    Django admin (already the project's admin-facing surface for every
+    other model) rather than a bespoke approval UI."""
+
+    STATUS_CHOICES = [("PENDING", "Pending"), ("APPROVED", "Approved"), ("REJECTED", "Rejected")]
+
+    use_case_id = models.CharField(max_length=100)
+    bucket = models.CharField(max_length=20)
+    dimension = models.CharField(max_length=50)
+    current_threshold = models.FloatField()
+    proposed_threshold = models.FloatField()
+    rationale = models.TextField(blank=True)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default="PENDING")
+    proposed_at = models.DateTimeField(auto_now_add=True)
+    reviewed_by = models.CharField(max_length=200, blank=True)
+    reviewed_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["-proposed_at"]
+
+    def __str__(self):
+        return f"ThresholdChangeProposal({self.use_case_id}, {self.dimension}, {self.status})"

@@ -1,0 +1,43 @@
+{% extends "core/base.html" %}
+{% block title %}Trends — ControlPlane.ai{% endblock %}
+{% block content %}
+<h1>Safety &amp; Quality Trends</h1>
+<p class="label">Section 10.2 — last {{ days }} days</p>
+
+<div class="grid">
+    <div class="card">
+        <div class="label">Hallucination Rate (avg score)</div>
+        <div class="stat" id="hallucination-rate">{{ hallucination_rate }}</div>
+    </div>
+    <div class="card">
+        <div class="label">Safety Violation Rate</div>
+        <div class="stat" id="safety-violation-rate">{{ safety_violation_rate }}%</div>
+    </div>
+    <div class="card">
+        <div class="label">Data Leakage Attempts</div>
+        <div class="stat" id="data-leakage-attempts">{{ data_leakage_attempts }}</div>
+    </div>
+    <div class="card">
+        <div class="label">Bias Detection Rate</div>
+        <div class="stat" id="bias-detection-rate">{{ bias_detection_rate }}%</div>
+    </div>
+    <div class="card">
+        <div class="label">Blocked Request Rate</div>
+        <div class="stat" id="blocked-request-rate">{{ blocked_request_rate.rate }}%</div>
+        <div class="label">{{ blocked_request_rate.blocked_count }} of {{ blocked_request_rate.total }}</div>
+    </div>
+    <div class="card">
+        <div class="label">Retry/Verify Rate</div>
+        <div class="stat" id="retry-verify-rate">{{ retry_verify_rate }}%</div>
+    </div>
+    <div class="card">
+        <div class="label">Human Review Rate</div>
+        <div class="stat" id="human-review-rate">{{ human_review_rate }}%</div>
+    </div>
+</div>
+
+<form method="get">
+    <label>Window (days): <input type="number" name="days" value="{{ days }}"></label>
+    <button type="submit">Refresh</button>
+</form>
+{% endblock %}

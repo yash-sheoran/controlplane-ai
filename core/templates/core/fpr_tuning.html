@@ -1,0 +1,94 @@
+{% extends "core/base.html" %}
+{% block title %}FPR Tuning — ControlPlane.ai{% endblock %}
+{% block content %}
+<h1>Alert Fatigue / FPR Tuning</h1>
+<p class="label">Section 9.3 — Operator Dashboard Alert Tuning View</p>
+
+{% if message %}<p class="message">{{ message }}</p>{% endif %}
+
+<div class="card">
+    <h3>Check false positive rate for a dimension</h3>
+    <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="check_fpr">
+        <input type="text" name="use_case_id" placeholder="use_case_id (optional)">
+        <input type="text" name="dimension" placeholder="dimension e.g. hallucination_risk" required>
+        <input type="number" name="days" value="7">
+        <button type="submit">Check FPR</button>
+    </form>
+    {% if result %}
+    <div id="fpr-result">
+        <p>Dimension: {{ result_dimension }} ({{ result_use_case_id|default:"all use cases" }})</p>
+        <p>Flagged: <span id="fpr-flagged-count">{{ result.flagged_count }}</span></p>
+        <p>False positives: <span id="fpr-false-positive-count">{{ result.false_positive_count }}</span></p>
+        <p>FPR: <span id="fpr-value">{{ result.fpr }}</span></p>
+    </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h3>Simulate a threshold change</h3>
+    <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="simulate_threshold_change">
+        <input type="text" name="use_case_id" placeholder="use_case_id" required>
+        <input type="text" name="bucket" placeholder="bucket e.g. human_review" required>
+        <input type="text" name="dimension" placeholder="dimension" required>
+        <input type="number" step="1" name="new_threshold" placeholder="proposed threshold" required>
+        <input type="number" name="days" value="7">
+        <button type="submit">Simulate</button>
+    </form>
+    {% if simulation %}
+    <div id="simulation-result">
+        <p>Current threshold: {{ simulation.current_threshold }} &rarr; Proposed: {{ simulation.proposed_threshold }}</p>
+        <p>Flags before: <span id="sim-flags-before">{{ simulation.flags_before }}</span>,
+           after: <span id="sim-flags-after">{{ simulation.flags_after }}</span></p>
+        <p>Reduction: <span id="sim-reduction-pct">{{ simulation.reduction_pct }}</span>%</p>
+        <p>Potentially missed confirmed issues: <span id="sim-missed-confirmed-issues">{{ simulation.missed_confirmed_issues }}</span></p>
+    </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h3>Propose a threshold change (routes to admin approval)</h3>
+    <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="propose_threshold">
+        <input type="text" name="use_case_id" placeholder="use_case_id" required>
+        <input type="text" name="bucket" placeholder="bucket" required>
+        <input type="text" name="dimension" placeholder="dimension" required>
+        <input type="number" name="current_threshold" placeholder="current threshold" required>
+        <input type="number" name="proposed_threshold" placeholder="proposed threshold" required>
+        <input type="text" name="rationale" placeholder="rationale">
+        <button type="submit">Propose</button>
+    </form>
+    {% if proposal %}<p class="message" id="proposal-created">Proposal #{{ proposal.pk }} created, status {{ proposal.status }}.</p>{% endif %}
+</div>
+
+<div class="card">
+    <h3>Pending proposals</h3>
+    <table id="pending-proposals-table">
+        <thead><tr><th>Use case</th><th>Bucket</th><th>Dimension</th><th>Current</th><th>Proposed</th></tr></thead>
+        <tbody>
+        {% for p in pending_proposals %}
+            <tr><td>{{ p.use_case_id }}</td><td>{{ p.bucket }}</td><td>{{ p.dimension }}</td><td>{{ p.current_threshold }}</td><td>{{ p.proposed_threshold }}</td></tr>
+        {% empty %}
+            <tr><td colspan="5">No pending proposals.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h3>Report a false positive</h3>
+    <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="report_false_positive">
+        <input type="text" name="trace_id" placeholder="trace id (request_id)" required>
+        <input type="text" name="dimension" placeholder="dimension" required>
+        <input type="text" name="reported_by" placeholder="reported by" required>
+        <input type="text" name="reason" placeholder="reason">
+        <button type="submit">Report</button>
+    </form>
+</div>
+{% endblock %}

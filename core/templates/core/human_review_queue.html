@@ -1,0 +1,41 @@
+{% extends "core/base.html" %}
+{% block title %}Human Review Queue — ControlPlane.ai{% endblock %}
+{% block content %}
+<h1>Human Review Queue</h1>
+<p class="label">Section 3 Step 9 HUMAN_REVIEW</p>
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if decided_case %}<p class="message">Decision recorded: {{ decided_case.decision }}</p>{% endif %}
+
+<div class="card">
+    <table id="pending-queue-table">
+        <thead><tr><th>Trace</th><th>Use case</th><th>Policy trigger reason</th><th>Decide</th></tr></thead>
+        <tbody>
+        {% for record in pending_cases %}
+            <tr class="pending-case-row" data-trace-id="{{ record.trace_id }}">
+                <td>{{ record.trace_id }}</td>
+                <td>{{ record.trace.use_case.use_case_id }}</td>
+                <td>{{ record.human_review.policy_trigger_reason }}</td>
+                <td>
+                    <form method="post" class="inline">
+                        {% csrf_token %}
+                        <input type="hidden" name="trace_id" value="{{ record.trace_id }}">
+                        <input type="text" name="reviewer_id" placeholder="reviewer id" required>
+                        <select name="decision">
+                            <option value="APPROVE">Approve</option>
+                            <option value="MODIFY">Modify</option>
+                            <option value="REJECT">Reject</option>
+                        </select>
+                        <input type="text" name="modified_response" placeholder="modified response (if MODIFY)">
+                        <input type="text" name="decision_reason" placeholder="reason">
+                        <button type="submit">Submit</button>
+                    </form>
+                </td>
+            </tr>
+        {% empty %}
+            <tr><td colspan="4">No pending cases.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

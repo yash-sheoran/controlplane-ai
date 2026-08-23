@@ -8,12 +8,23 @@ from django.test import TestCase
 
 from . import agentic_gate as ag
 from . import auditing_engine as ae
+from . import dashboard
 from . import decision_executor as de
 from . import model_pipeline as mp
 from . import policy_engine as pe
 from . import pre_request_analysis as pra
 from . import session_risk as sr
-from .models import AuditRecord, PolicyConfig, SessionState, Trace, UseCaseProfile
+from .models import (
+    AuditRecord,
+    FalsePositiveReport,
+    PolicyConfig,
+    ReviewerAction,
+    SessionState,
+    ThresholdChangeProposal,
+    Trace,
+    UseCaseProfile,
+    UserFeedback,
+)
 from .views import SAFE_ERROR_MESSAGE
 
 
@@ -1693,3 +1704,383 @@ class AgenticPreActionGateTests(TestCase):
         )
         # tag_for_rollback must not mutate the original entry.
         self.assertFalse(entry["rollback_recommended"])
+
+
+def _seed_dashboard_records(use_case):
+    """5 AuditRecords with hand-computable aggregates, used across the
+    dashboard aggregation and view tests below.
+
+    (final_action, latency_ms, cost_usd, model, retry_count,
+     hallucination_risk, safety_risk, bias_risk, data_leakage_risk,
+     rules_triggered)
+    """
+    specs = [
+        ("ALLOW", 100, 0.01, "claude-haiku-4-5", 0, 2, 1, 1, 1, []),
+        ("ALLOW", 200, 0.02, "claude-sonnet-4-6", 1, 3, 2, 2, 2, []),
+        ("VERIFY", 150, 0.015, "claude-haiku-4-5", 1, 7, 3, 1, 1, ["VERIFY_CHECK:hallucination_risk"]),
+        ("HUMAN_REVIEW", 300, 0.03, "claude-opus", 0, 4, 8, 2, 3, ["HUMAN_REVIEW_CHECK:safety_risk"]),
+        ("BLOCK", 50, 0.005, "claude-haiku-4-5", 0, 2, 9, 1, 9, ["BLOCK_CHECK:data_leakage_risk"]),
+    ]
+    records = []
+    for final_action, latency, cost, model, retries, halluc, safety, bias, leakage, triggered in specs:
+        trace = Trace.objects.create(user_id="u1", use_case=use_case, raw_prompt="hi")
+        human_review = None
+        human_review_status = None
+        if final_action == "HUMAN_REVIEW":
+            human_review_status = "PENDING"
+            human_review = {
+                "status": "PENDING",
+                "audit_json": {},
+                "raw_response": "Here is some financial guidance.",
+                "redacted_response": "Here is some financial guidance.",
+                "policy_trigger_reason": "human_review threshold breached on 'safety_risk'.",
+                "reviewer_id": None,
+                "decision": None,
+                "decided_at": None,
+                "final_user_response": None,
+            }
+        record = AuditRecord.objects.create(
+            trace=trace,
+            response_metrics={
+                "latency_ms": latency, "cost_usd": cost, "model_used": model,
+                "retry_count": retries, "input_tokens": 10, "output_tokens": 5,
+                "total_tokens": 15, "finish_reason": "stop",
+            },
+            audit_quality={
+                "hallucination_risk_score": halluc, "correctness_score": 8,
+                "relevance_score": 8, "completeness_score": 8,
+                "instruction_following_score": 8, "consistency_score": 8,
+            },
+            audit_responsibility={
+                "safety_risk_score": safety, "bias_risk_score": bias,
+                "data_leakage_risk_score": leakage, "toxicity_risk_score": 1,
+                "policy_violation_risk_score": 1, "prompt_injection_risk_score": 1,
+            },
+            final_action=final_action,
+            policy_rules_triggered=triggered,
+            human_review_status=human_review_status,
+            human_review=human_review,
+        )
+        records.append(record)
+    return records
+
+
+class DashboardAggregationTests(TestCase):
+    """Section 10.1/10.2 — pure aggregation logic, tested directly against
+    hand-computed expectations from _seed_dashboard_records' fixture."""
+
+    def setUp(self):
+        self.use_case = UseCaseProfile.objects.create(use_case_id="CustomerSupport", name="Customer Support")
+        self.records = _seed_dashboard_records(self.use_case)
+
+    def test_total_requests(self):
+        since = timezone_now_minus_hours(24)
+        self.assertEqual(dashboard.total_requests(since=since), 5)
+
+    def test_decision_distribution(self):
+        result = dashboard.decision_distribution()
+        self.assertEqual(result["total"], 5)
+        self.assertEqual(result["counts"], {"ALLOW": 2, "VERIFY": 1, "MODIFY": 0, "HUMAN_REVIEW": 1, "BLOCK": 1})
+        self.assertEqual(result["percentages"]["ALLOW"], 40.0)
+        self.assertEqual(result["percentages"]["VERIFY"], 20.0)
+        self.assertEqual(result["percentages"]["HUMAN_REVIEW"], 20.0)
+        self.assertEqual(result["percentages"]["BLOCK"], 20.0)
+
+    def test_latency_percentiles(self):
+        # sorted latencies: [50, 100, 150, 200, 300]
+        result = dashboard.latency_percentiles()
+        self.assertEqual(result["p50"], 150)
+        self.assertAlmostEqual(result["p90"], 260.0, places=2)
+        self.assertAlmostEqual(result["p99"], 296.0, places=2)
+
+    def test_total_cost_today(self):
+        self.assertAlmostEqual(dashboard.total_cost_today(), 0.08, places=6)
+
+    def test_cost_per_model(self):
+        result = dashboard.cost_per_model()
+        self.assertAlmostEqual(result["claude-haiku-4-5"], 0.03, places=6)
+        self.assertAlmostEqual(result["claude-sonnet-4-6"], 0.02, places=6)
+        self.assertAlmostEqual(result["claude-opus"], 0.03, places=6)
+
+    def test_active_human_review_queue_count(self):
+        self.assertEqual(dashboard.active_human_review_queue_count(), 1)
+
+    def test_hallucination_rate(self):
+        # mean(2, 3, 7, 4, 2) = 3.6
+        self.assertAlmostEqual(dashboard.hallucination_rate(days=7), 3.6, places=4)
+
+    def test_safety_violation_rate(self):
+        # safety_risk scores [1,2,3,8,9]; >=7: 2/5 = 40%
+        self.assertAlmostEqual(dashboard.safety_violation_rate(days=7), 40.0, places=2)
+
+    def test_data_leakage_attempts(self):
+        # data_leakage_risk scores [1,2,1,3,9]; >=7: only the last -> 1
+        self.assertEqual(dashboard.data_leakage_attempts(days=7), 1)
+
+    def test_bias_detection_rate(self):
+        # bias_risk scores [1,2,1,2,1]; none >= 7 -> 0%
+        self.assertAlmostEqual(dashboard.bias_detection_rate(days=7), 0.0, places=2)
+
+    def test_blocked_request_rate(self):
+        result = dashboard.blocked_request_rate(days=7)
+        self.assertAlmostEqual(result["rate"], 20.0, places=2)
+        self.assertEqual(result["blocked_count"], 1)
+        self.assertEqual(result["total"], 5)
+        self.assertEqual(result["by_reason"], {"BLOCK_CHECK:data_leakage_risk": 1})
+
+    def test_retry_verify_rate(self):
+        # retry_count >= 1 for 2 of 5 records -> 40%
+        self.assertAlmostEqual(dashboard.retry_verify_rate(days=7), 40.0, places=2)
+
+    def test_human_review_rate(self):
+        self.assertAlmostEqual(dashboard.human_review_rate(days=7), 20.0, places=2)
+
+
+def timezone_now_minus_hours(hours):
+    from django.utils import timezone
+    return timezone.now() - timezone.timedelta(hours=hours)
+
+
+class DashboardViewTests(TestCase):
+    """Test: seed the DB with sample AuditRecord/Trace rows, load each
+    dashboard page, assert the rendered aggregation numbers match a
+    hand-computed expectation."""
+
+    def setUp(self):
+        self.use_case = UseCaseProfile.objects.create(use_case_id="CustomerSupport", name="Customer Support")
+        self.records = _seed_dashboard_records(self.use_case)
+
+    def test_dashboard_home_renders_correct_numbers(self):
+        response = self.client.get("/dashboard/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["total_requests_24h"], 5)
+        self.assertEqual(response.context["decision_distribution"]["counts"]["ALLOW"], 2)
+        self.assertEqual(response.context["active_human_review_queue_count"], 1)
+        self.assertAlmostEqual(response.context["total_cost_today"], 0.08, places=6)
+
+        body = response.content.decode()
+        self.assertIn(">5<", body.replace(" ", ""))  # total requests rendered
+        self.assertIn("HUMAN_REVIEW", body)
+
+    def test_dashboard_trends_renders_correct_numbers(self):
+        response = self.client.get("/dashboard/trends/")
+        self.assertEqual(response.status_code, 200)
+        self.assertAlmostEqual(response.context["hallucination_rate"], 3.6, places=4)
+        self.assertAlmostEqual(response.context["safety_violation_rate"], 40.0, places=2)
+        self.assertEqual(response.context["data_leakage_attempts"], 1)
+        self.assertAlmostEqual(response.context["human_review_rate"], 20.0, places=2)
+
+    def test_human_review_queue_lists_pending_case(self):
+        response = self.client.get("/dashboard/human-review/")
+        self.assertEqual(response.status_code, 200)
+        pending = response.context["pending_cases"]
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].final_action, "HUMAN_REVIEW")
+        self.assertIn(str(pending[0].trace_id), response.content.decode())
+
+    def test_fpr_tuning_page_loads(self):
+        response = self.client.get("/dashboard/fpr-tuning/")
+        self.assertEqual(response.status_code, 200)
+
+
+class HumanReviewDecisionViewTests(TestCase):
+    """Test: submit a reviewer decision through the UI/API and assert
+    it's persisted as a gold-standard label tied to the original audit
+    record."""
+
+    def setUp(self):
+        self.use_case = UseCaseProfile.objects.create(use_case_id="DecisionSupport", name="Decision Support")
+        self.records = _seed_dashboard_records(self.use_case)
+        self.pending_record = next(r for r in self.records if r.final_action == "HUMAN_REVIEW")
+
+    def test_approve_decision_persists_as_gold_standard_label(self):
+        response = self.client.post("/dashboard/human-review/", {
+            "trace_id": str(self.pending_record.trace_id),
+            "reviewer_id": "reviewer-42",
+            "decision": "APPROVE",
+            "decision_reason": "Looks correct on review.",
+        })
+        self.assertEqual(response.status_code, 200)
+
+        self.pending_record.refresh_from_db()
+        self.assertEqual(self.pending_record.human_review_status, "DECIDED")
+        self.assertEqual(self.pending_record.human_review["decision"], "APPROVE")
+        self.assertEqual(
+            self.pending_record.human_review["final_user_response"],
+            "Here is some financial guidance.",
+        )
+
+        actions = ReviewerAction.objects.filter(audit_record=self.pending_record)
+        self.assertEqual(actions.count(), 1)
+        action = actions.first()
+        self.assertEqual(action.reviewer_id, "reviewer-42")
+        self.assertEqual(action.decision, "APPROVE")
+        self.assertEqual(action.decision_reason, "Looks correct on review.")
+
+    def test_modify_decision_uses_reviewers_text(self):
+        response = self.client.post("/dashboard/human-review/", {
+            "trace_id": str(self.pending_record.trace_id),
+            "reviewer_id": "reviewer-42",
+            "decision": "MODIFY",
+            "modified_response": "Corrected guidance text.",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.pending_record.refresh_from_db()
+        self.assertEqual(self.pending_record.human_review["final_user_response"], "Corrected guidance text.")
+        self.assertEqual(ReviewerAction.objects.get(audit_record=self.pending_record).decision, "MODIFY")
+
+    def test_reject_decision_recorded_and_leaks_nothing(self):
+        response = self.client.post("/dashboard/human-review/", {
+            "trace_id": str(self.pending_record.trace_id),
+            "reviewer_id": "reviewer-42",
+            "decision": "REJECT",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.pending_record.refresh_from_db()
+        self.assertEqual(self.pending_record.human_review["final_user_response"], de.SAFE_BLOCK_MESSAGE)
+
+    def test_invalid_decision_value_does_not_persist_and_returns_error(self):
+        response = self.client.post("/dashboard/human-review/", {
+            "trace_id": str(self.pending_record.trace_id),
+            "reviewer_id": "reviewer-42",
+            "decision": "MAYBE",
+        })
+        self.assertEqual(response.status_code, 400)
+        self.pending_record.refresh_from_db()
+        self.assertEqual(self.pending_record.human_review_status, "PENDING")
+        self.assertEqual(ReviewerAction.objects.filter(audit_record=self.pending_record).count(), 0)
+
+    def test_after_decision_case_no_longer_appears_in_pending_queue(self):
+        self.client.post("/dashboard/human-review/", {
+            "trace_id": str(self.pending_record.trace_id),
+            "reviewer_id": "reviewer-42",
+            "decision": "APPROVE",
+        })
+        response = self.client.get("/dashboard/human-review/")
+        self.assertEqual(len(response.context["pending_cases"]), 0)
+
+
+class FprTuningViewTests(TestCase):
+    """Section 9.3 — Operator Dashboard Alert Tuning View."""
+
+    def setUp(self):
+        self.use_case = UseCaseProfile.objects.create(use_case_id="DecisionSupport", name="Decision Support")
+
+    def _make_record(self, hallucination_risk_score, rules_triggered):
+        trace = Trace.objects.create(user_id="u1", use_case=self.use_case, raw_prompt="hi")
+        return AuditRecord.objects.create(
+            trace=trace,
+            audit_quality={"hallucination_risk_score": hallucination_risk_score, "correctness_score": 8},
+            audit_responsibility={"safety_risk_score": 1},
+            final_action="VERIFY",
+            policy_rules_triggered=rules_triggered,
+        )
+
+    def test_check_fpr_computes_correct_rate(self):
+        flagged_1 = self._make_record(7, ["VERIFY_CHECK:hallucination_risk"])
+        flagged_2 = self._make_record(8, ["VERIFY_CHECK:hallucination_risk"])
+        flagged_3 = self._make_record(9, ["HUMAN_REVIEW_CHECK:hallucination_risk"])
+        self._make_record(1, [])  # not flagged, should not count
+
+        FalsePositiveReport.objects.create(
+            audit_record=flagged_1, dimension="hallucination_risk", reported_by="op-1",
+        )
+
+        response = self.client.post("/dashboard/fpr-tuning/", {
+            "action": "check_fpr",
+            "use_case_id": "DecisionSupport",
+            "dimension": "hallucination_risk",
+            "days": "7",
+        })
+        self.assertEqual(response.status_code, 200)
+        result = response.context["result"]
+        self.assertEqual(result["flagged_count"], 3)
+        self.assertEqual(result["false_positive_count"], 1)
+        self.assertAlmostEqual(result["fpr"], 1 / 3, places=4)
+
+    def test_simulate_threshold_change(self):
+        # DecisionSupport's verify.hallucination_risk threshold is 6.
+        record_6 = self._make_record(6, ["VERIFY_CHECK:hallucination_risk"])
+        record_7 = self._make_record(7, ["VERIFY_CHECK:hallucination_risk"])
+        self._make_record(8, ["VERIFY_CHECK:hallucination_risk"])
+
+        # record_6 is reported as a false positive; record_7 is not, so it
+        # is presumed a confirmed issue that raising the threshold would miss.
+        FalsePositiveReport.objects.create(
+            audit_record=record_6, dimension="hallucination_risk", reported_by="op-1",
+        )
+
+        response = self.client.post("/dashboard/fpr-tuning/", {
+            "action": "simulate_threshold_change",
+            "use_case_id": "DecisionSupport",
+            "bucket": "verify",
+            "dimension": "hallucination_risk",
+            "new_threshold": "8",
+            "days": "7",
+        })
+        self.assertEqual(response.status_code, 200)
+        sim = response.context["simulation"]
+        self.assertEqual(sim["current_threshold"], 6)
+        self.assertEqual(sim["proposed_threshold"], 8.0)
+        self.assertEqual(sim["flags_before"], 3)
+        self.assertEqual(sim["flags_after"], 1)
+        self.assertAlmostEqual(sim["reduction_pct"], (3 - 1) / 3 * 100, places=2)
+        self.assertEqual(sim["missed_confirmed_issues"], 1)  # record_7 only
+
+    def test_propose_threshold_creates_pending_proposal(self):
+        response = self.client.post("/dashboard/fpr-tuning/", {
+            "action": "propose_threshold",
+            "use_case_id": "DecisionSupport",
+            "bucket": "verify",
+            "dimension": "hallucination_risk",
+            "current_threshold": "6",
+            "proposed_threshold": "8",
+            "rationale": "High FPR observed over the last week.",
+        })
+        self.assertEqual(response.status_code, 200)
+        proposal = ThresholdChangeProposal.objects.get()
+        self.assertEqual(proposal.status, "PENDING")
+        self.assertEqual(proposal.use_case_id, "DecisionSupport")
+        self.assertEqual(proposal.proposed_threshold, 8.0)
+
+    def test_report_false_positive_creates_report(self):
+        record = self._make_record(7, ["VERIFY_CHECK:hallucination_risk"])
+        response = self.client.post("/dashboard/fpr-tuning/", {
+            "action": "report_false_positive",
+            "trace_id": str(record.trace_id),
+            "dimension": "hallucination_risk",
+            "reported_by": "op-1",
+            "reason": "Manually verified as correct.",
+        })
+        self.assertEqual(response.status_code, 200)
+        report = FalsePositiveReport.objects.get()
+        self.assertEqual(report.audit_record_id, record.trace_id)
+        self.assertEqual(report.dimension, "hallucination_risk")
+
+
+class ThumbsDownViewTests(TestCase):
+    """Section 7.1 User Thumbs-Down."""
+
+    def setUp(self):
+        self.use_case = UseCaseProfile.objects.create(use_case_id="CustomerSupport", name="Customer Support")
+        self.trace = Trace.objects.create(user_id="u1", use_case=self.use_case, raw_prompt="hi")
+
+    def test_thumbs_down_creates_feedback_row(self):
+        response = self.client.post(
+            f"/api/feedback/{self.trace.request_id}/thumbs-down/",
+            data=json.dumps({"comment": "This answer was unhelpful."}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+        feedback = UserFeedback.objects.get(trace=self.trace)
+        self.assertEqual(feedback.comment, "This answer was unhelpful.")
+        self.assertFalse(feedback.reviewed)
+
+    def test_thumbs_down_without_body_still_works(self):
+        response = self.client.post(f"/api/feedback/{self.trace.request_id}/thumbs-down/")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(UserFeedback.objects.filter(trace=self.trace).count(), 1)
+
+    def test_thumbs_down_for_unknown_trace_returns_404(self):
+        response = self.client.post(f"/api/feedback/{uuid.uuid4()}/thumbs-down/")
+        self.assertEqual(response.status_code, 404)
