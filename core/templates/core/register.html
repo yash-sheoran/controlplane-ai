@@ -1,0 +1,66 @@
+{% extends "core/base.html" %}
+{% block title %}Register — ControlPlane.ai{% endblock %}
+{% block content %}
+<style>
+    .auth-shell { max-width: 400px; margin: 64px auto 0; }
+    .auth-shell h1 { text-align: center; margin-bottom: 24px; }
+    .auth-shell .card { padding: 28px; }
+    .auth-shell .card form { display: flex; flex-direction: column; gap: 14px; }
+    .auth-shell label { font-size: 13px; color: var(--text-secondary); font-weight: 500; display: flex; flex-direction: column; gap: 6px; }
+    .auth-shell input, .auth-shell select { width: 100%; box-sizing: border-box; padding: 9px 11px; }
+    .auth-shell .errors { color: var(--danger); font-size: 13px; margin: 0 0 4px; padding-left: 18px; }
+    .auth-shell .switch-link { text-align: center; font-size: 13px; color: var(--text-secondary); margin-top: 16px; }
+    .auth-shell button[type="submit"] { margin-top: 4px; padding: 10px 14px; }
+</style>
+
+<div class="auth-shell">
+    <h1>Create an account</h1>
+    <div class="card">
+        {% if errors %}
+            <ul class="errors">
+                {% for err in errors %}<li>{{ err }}</li>{% endfor %}
+            </ul>
+        {% endif %}
+        <form method="post" id="register-form">
+            {% csrf_token %}
+            <label>Name
+                <input type="text" name="name" value="{{ form_values.name }}" required>
+            </label>
+            <label>Email
+                <input type="email" name="email" value="{{ form_values.email }}" required>
+            </label>
+            <label>Role
+                <select name="role" id="role-select" required>
+                    <option value="">Select a role&hellip;</option>
+                    {% for value, display in roles %}
+                        <option value="{{ value }}" {% if value == form_values.role %}selected{% endif %}>{{ display }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label id="manager-email-field">Manager's email
+                <input type="email" name="manager_email" value="{{ form_values.manager_email }}" placeholder="required for the Employee role">
+            </label>
+            <label>Password
+                <input type="password" name="password" required>
+            </label>
+            <label>Confirm password
+                <input type="password" name="confirm_password" required>
+            </label>
+            <button type="submit">Register</button>
+        </form>
+        <div class="switch-link">Already have an account? <a href="{% url 'login' %}">Log in</a></div>
+    </div>
+</div>
+
+<script>
+    (function () {
+        var roleSelect = document.getElementById("role-select");
+        var managerField = document.getElementById("manager-email-field");
+        function syncManagerField() {
+            managerField.style.display = roleSelect.value === "manager" ? "none" : "";
+        }
+        roleSelect.addEventListener("change", syncManagerField);
+        syncManagerField();
+    })();
+</script>
+{% endblock %}

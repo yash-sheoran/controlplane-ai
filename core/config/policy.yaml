@@ -1,0 +1,91 @@
+# Section 5.1 Policy Configuration Format — this is a literal transcription
+# (block style instead of the document's inline flow style; semantically
+# identical) of the document's own concrete example for DecisionSupport:
+#
+#   use_case_id: DecisionSupport
+#   geography: IN,EU # applies DPDP, GDPR rules
+#   thresholds:
+#     block: { data_leakage_risk: 8, safety_risk: 8, toxicity_risk: 9 }
+#     human_review: { safety_risk: 7, policy_violation_risk: 7, hallucination_risk: 8 }
+#     modify: { data_leakage_risk: 5, pii_detected: true }
+#     verify: { hallucination_risk: 6, correctness: 5 }
+#     max_retries: 2
+#     latency_budget_ms: 8000
+#     require_human_review_for_final_block: true
+#
+# NOTE: Section 3 Step 4 separately gives "30 s for DecisionSupport" as an
+# illustrative timeout example, which conflicts with this file's literal
+# latency_budget_ms: 8000 (8s) from Section 5.1 — another internal
+# inconsistency in the source document. This file keeps 5.1's literal
+# value since 5.1 is the actual concrete example config, not a narrative
+# aside.
+#
+# EXTENSION beyond the document's literal example (explicit product
+# decision, not sourced from the document): bias_risk/prompt_injection_risk
+# added to what the doc calls "human_review", and relevance/completeness/
+# instruction_following/consistency added to verify. Before this, 6 of the
+# 12 audit dimensions were scored on every request but never consulted by
+# any bucket here — pure telemetry with no enforcement. bias_risk/
+# prompt_injection_risk join at the same threshold as this profile's other
+# high-band risk checks (policy_violation_risk: 7) — biased or
+# injected-looking output is a real risk, but nuanced enough to warrant a
+# closer look rather than an automatic block. The four quality dimensions
+# join verify alongside correctness at the same threshold (5) — the same
+# "is this response actually good" family of checks, deserving the same
+# remedy (retry with an enhanced prompt / escalate tier) as a low
+# correctness score.
+#
+# LATER PRODUCT DECISION — bucket renamed human_review -> verify_warning,
+# toxicity_risk relocated here from `block`: Human Review is now decided
+# ONLY by the prompt-time company-policy audit (core/config/
+# company_policy.json), before generation — never by anything in this
+# response-side file. core.policy_engine.evaluate_policy no longer
+# consults a "human_review" bucket at all (see its RULE_ORDER); this
+# bucket (renamed to make that unreachable-for-routing status explicit,
+# rather than leaving a live key that no longer does what its name says)
+# is consulted only by evaluate_verify_warnings, which turns a breach
+# here into a non-gating "Verify warning" label shown alongside the
+# (still delivered) response. toxicity_risk moved here from `block` below,
+# at its same threshold: a toxic response is now flagged, never blocked
+# outright.
+#
+# LATER PRODUCT DECISION — "use case" concept removed entirely: this file
+# used to be one of three per-use-case policy files (core/config/
+# policies/{DecisionSupport,CustomerSupport,InternalKnowledge}.yaml),
+# selected per-request by a use_case_id every Trace carried. The other two
+# were always explicitly-labelled illustrative placeholders, never sourced
+# from the document; this file (DecisionSupport's) was the one literal
+# transcription, so it became the system's single, permanent policy —
+# moved here from core/config/policies/DecisionSupport.yaml, with the
+# use_case_id/geography keys dropped (geography was already dead — the
+# pipeline read it off the UseCaseProfile DB row, never off this key).
+thresholds:
+  block:
+    data_leakage_risk: 8
+    safety_risk: 8
+  verify_warning:
+    safety_risk: 7
+    policy_violation_risk: 7
+    hallucination_risk: 8
+    bias_risk: 7
+    prompt_injection_risk: 7
+    toxicity_risk: 9
+  modify:
+    data_leakage_risk: 5
+    pii_detected: true
+  verify:
+    hallucination_risk: 6
+    correctness: 5
+    relevance: 5
+    completeness: 5
+    instruction_following: 5
+    consistency: 5
+max_retries: 2
+latency_budget_ms: 8000
+require_human_review_for_final_block: true
+# Section 14.2 schema fields, not exercised until Section 6.1 (Step 8):
+# session_risk_window's default of 5 is doc-grounded ("default N = 5");
+# session_risk_threshold has no concrete value anywhere in the document —
+# this is an illustrative placeholder, not sourced from it.
+session_risk_window: 5
+session_risk_threshold: 5.0

@@ -1,11 +1,10 @@
 """Section 8 — Regulatory & Geography-Aware Compliance Module.
 
 Regulations are modelled as versioned YAML rule sets stored separately
-from application code (Section 8.1), loaded per use-case based on its
-configured `regulations` list (Section 5.2's geography-aware rule
-injection — the use-case's `geography` determines *which* regulations
-apply operationally, but this project's UseCaseProfile already stores
-the resolved `regulations` list directly rather than re-deriving it from
+from application code (Section 8.1), loaded from a fixed `regulations`
+list (Section 5.2's geography-aware rule injection — geography determines
+*which* regulations apply operationally, but this project passes the
+resolved `regulations` list directly rather than re-deriving it from
 geography codes, since the doc names specific regulations per geography
 example rather than a formal geography-to-regulation mapping table).
 """
@@ -72,16 +71,16 @@ def build_compliance_metadata(regulation_ids, eu_ai_act_high_risk, base_audit_re
     regulatory minimum" (Section 10.3: up to 7 years), and (structurally,
     per Section 3 Step 9's own design) mandatory human oversight on
     HUMAN_REVIEW decisions — already true of every HUMAN_REVIEW case in
-    this project, since core.decision_executor.apply_reviewer_decision
-    always requires a human reviewer_id; there is no auto-approve path
-    for it to be disabled for.
+    this project, since core.decision_executor.apply_prompt_review_
+    decision always requires a human reviewer_id; there is no
+    auto-approve path for it to be disabled for.
 
-    `eu_ai_act_high_risk` is a per-use-case configuration flag (see
-    UseCaseProfile.eu_ai_act_high_risk) — the document references "EU AI
-    Act Annex III high-risk categories" without enumerating them or
-    giving a concrete classification rule, so classification is an
-    explicit configuration decision an operator makes, not something
-    this system infers.
+    `eu_ai_act_high_risk` is a fixed configuration flag (core.pipeline's
+    _FIXED_EU_AI_ACT_HIGH_RISK) — the document references "EU AI Act
+    Annex III high-risk categories" without enumerating them or giving a
+    concrete classification rule, so classification is an explicit
+    configuration decision an operator makes, not something this system
+    infers.
     """
     regulation_result = apply_regulations(regulation_ids)
 

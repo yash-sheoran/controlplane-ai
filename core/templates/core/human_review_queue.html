@@ -1,41 +1,187 @@
 {% extends "core/base.html" %}
 {% block title %}Human Review Queue — ControlPlane.ai{% endblock %}
 {% block content %}
-<h1>Human Review Queue</h1>
-<p class="label">Section 3 Step 9 HUMAN_REVIEW</p>
+<style>
+    #pending-queue-table td { vertical-align: top; }
+    .prq-time { font-size: 12.5px; color: var(--text-secondary); white-space: nowrap; }
+    .prq-employee { font-size: 13px; word-break: break-all; }
+    .prq-view-btn {
+        background: transparent; color: var(--text-primary); border: 1px solid var(--border-strong);
+        border-radius: var(--radius-sm); padding: 6px 10px; font-size: 12.5px; font-weight: 500; white-space: nowrap;
+    }
+    .prq-view-btn:hover { background: var(--bg-hover); }
 
-{% if error %}<p class="error">{{ error }}</p>{% endif %}
-{% if decided_case %}<p class="message">Decision recorded: {{ decided_case.decision }}</p>{% endif %}
+    .pr-modal-overlay {
+        display: none; position: fixed; inset: 0; background: rgba(15, 15, 15, 0.45);
+        align-items: center; justify-content: center; z-index: 100; padding: 24px;
+    }
+    .pr-modal-overlay.open { display: flex; }
+    .pr-modal-box {
+        background: var(--bg); border-radius: var(--radius-lg); width: 100%; max-width: 720px;
+        max-height: 85vh; display: flex; flex-direction: column; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+    }
+    .pr-modal-header { padding: 18px 24px; border-bottom: 1px solid var(--border); }
+    .pr-modal-header h3 { margin: 0 0 2px; }
+    .pr-modal-meta { font-size: 12px; color: var(--text-secondary); }
+    .pr-modal-body { padding: 20px 24px; overflow-y: auto; flex: 1; }
+    .pr-section { margin-bottom: 20px; }
+    .pr-section:last-child { margin-bottom: 0; }
+    .pr-section-label {
+        font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+        color: var(--text-tertiary); margin-bottom: 8px;
+    }
+    .pr-bubble { background: var(--bg-secondary); border-radius: 16px; padding: 12px 16px; }
+    .pr-bubble-content { font-size: 14px; line-height: 1.55; color: var(--text-primary); word-wrap: break-word; }
+    .pr-bubble-content.prompt-text { white-space: pre-wrap; }
+    .pr-policy-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+    .pr-policy-tag {
+        display: inline-block; background: var(--purple-bg); color: var(--purple); font-size: 12.5px;
+        font-weight: 500; padding: 4px 10px; border-radius: 999px;
+    }
+    .pr-reason-text { font-size: 14px; line-height: 1.55; color: var(--text-primary); }
+    .pr-modal-footer { padding: 14px 24px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; }
+</style>
+
+<h1>Human Review Queue</h1>
+
+{% if generation_failed_notice %}
+<div class="card" id="generation-failed-notice" style="border-color: var(--danger); background: var(--danger-bg); color: var(--danger);">
+    {{ generation_failed_notice }}
+</div>
+{% endif %}
 
 <div class="card">
     <table id="pending-queue-table">
-        <thead><tr><th>Trace</th><th>Use case</th><th>Policy trigger reason</th><th>Decide</th></tr></thead>
+        <thead>
+            <tr>
+                <th>Trace</th>
+                <th>Employee</th>
+                <th>Time</th>
+                <th>Policy trigger reason</th>
+                <th>Prompt &amp; Policy</th>
+                <th>Decide</th>
+            </tr>
+        </thead>
         <tbody>
         {% for record in pending_cases %}
             <tr class="pending-case-row" data-trace-id="{{ record.trace_id }}">
                 <td>{{ record.trace_id }}</td>
-                <td>{{ record.trace.use_case.use_case_id }}</td>
+                <td class="prq-employee">{{ record.trace.user_id }}</td>
+                <td class="prq-time">{{ record.trace.timestamp|date:"M j, H:i" }}</td>
                 <td>{{ record.human_review.policy_trigger_reason }}</td>
+                <td>
+                    <button type="button" class="prq-view-btn"
+                            data-raw-prompt="{{ record.trace.raw_prompt }}"
+                            data-violated-policies="{{ record.human_review.violated_policies|join:"," }}"
+                            data-reason="{{ record.human_review.policy_trigger_reason }}">View</button>
+                </td>
                 <td>
                     <form method="post" class="inline">
                         {% csrf_token %}
                         <input type="hidden" name="trace_id" value="{{ record.trace_id }}">
-                        <input type="text" name="reviewer_id" placeholder="reviewer id" required>
                         <select name="decision">
                             <option value="APPROVE">Approve</option>
-                            <option value="MODIFY">Modify</option>
                             <option value="REJECT">Reject</option>
                         </select>
-                        <input type="text" name="modified_response" placeholder="modified response (if MODIFY)">
                         <input type="text" name="decision_reason" placeholder="reason">
                         <button type="submit">Submit</button>
                     </form>
                 </td>
             </tr>
         {% empty %}
-            <tr><td colspan="4">No pending cases.</td></tr>
+            <tr><td colspan="6">No pending cases.</td></tr>
         {% endfor %}
         </tbody>
     </table>
 </div>
+
+<div class="pr-modal-overlay" id="pr-modal-overlay">
+    <div class="pr-modal-box">
+        <div class="pr-modal-header">
+            <h3>Prompt &amp; Policy Review</h3>
+            <div class="pr-modal-meta" id="pr-modal-meta"></div>
+        </div>
+        <div class="pr-modal-body">
+            <div class="pr-section">
+                <div class="pr-section-label">Prompt</div>
+                <div class="pr-bubble"><div class="pr-bubble-content prompt-text" id="pr-modal-prompt"></div></div>
+            </div>
+            <div class="pr-section">
+                <div class="pr-section-label">Violated policies</div>
+                <div class="pr-policy-tags" id="pr-modal-policies"></div>
+            </div>
+            <div class="pr-section">
+                <div class="pr-section-label">Why this was flagged</div>
+                <div class="pr-reason-text" id="pr-modal-reason"></div>
+            </div>
+        </div>
+        <div class="pr-modal-footer">
+            <button type="button" id="pr-modal-ok">OK</button>
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+    function prettifyPolicyKey(key) {
+        return key.replace(/_/g, " ").replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+    }
+
+    var overlay = document.getElementById("pr-modal-overlay");
+    var promptEl = document.getElementById("pr-modal-prompt");
+    var policiesEl = document.getElementById("pr-modal-policies");
+    var reasonEl = document.getElementById("pr-modal-reason");
+    var metaEl = document.getElementById("pr-modal-meta");
+
+    function openModal(row) {
+        // Read from the button's own data-* attributes, not a <script>
+        // tag's textContent: browsers never HTML-decode entities inside
+        // <script> content (it's parsed as raw text), so e.g. an
+        // apostrophe in the prompt would arrive here still literally
+        // escaped as "&#x27;". Attribute values ARE entity-decoded by
+        // the browser, so this is the correct read.
+        var btn = row.querySelector(".prq-view-btn");
+
+        promptEl.textContent = btn.dataset.rawPrompt || "";
+
+        var keys = (btn.dataset.violatedPolicies || "").split(",").map(function (k) { return k.trim(); }).filter(Boolean);
+        policiesEl.innerHTML = "";
+        if (keys.length) {
+            keys.forEach(function (key) {
+                var tag = document.createElement("span");
+                tag.className = "pr-policy-tag";
+                tag.textContent = prettifyPolicyKey(key);
+                policiesEl.appendChild(tag);
+            });
+        } else {
+            policiesEl.innerHTML = '<span class="label">None recorded.</span>';
+        }
+
+        reasonEl.textContent = btn.dataset.reason || "";
+
+        var employee = row.querySelector(".prq-employee").textContent;
+        var time = row.querySelector(".prq-time").textContent;
+        metaEl.textContent = employee + " · " + time;
+
+        overlay.classList.add("open");
+    }
+
+    document.querySelectorAll(".prq-view-btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+            openModal(btn.closest("tr"));
+        });
+    });
+
+    function closeModal() {
+        overlay.classList.remove("open");
+    }
+    document.getElementById("pr-modal-ok").addEventListener("click", closeModal);
+    overlay.addEventListener("click", function (e) {
+        if (e.target === overlay) { closeModal(); }
+    });
+    document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape" && overlay.classList.contains("open")) { closeModal(); }
+    });
+})();
+</script>
 {% endblock %}

@@ -11,14 +11,13 @@
     <form method="post">
         {% csrf_token %}
         <input type="hidden" name="action" value="check_fpr">
-        <input type="text" name="use_case_id" placeholder="use_case_id (optional)">
         <input type="text" name="dimension" placeholder="dimension e.g. hallucination_risk" required>
         <input type="number" name="days" value="7">
         <button type="submit">Check FPR</button>
     </form>
     {% if result %}
     <div id="fpr-result">
-        <p>Dimension: {{ result_dimension }} ({{ result_use_case_id|default:"all use cases" }})</p>
+        <p>Dimension: {{ result_dimension }}</p>
         <p>Flagged: <span id="fpr-flagged-count">{{ result.flagged_count }}</span></p>
         <p>False positives: <span id="fpr-false-positive-count">{{ result.false_positive_count }}</span></p>
         <p>FPR: <span id="fpr-value">{{ result.fpr }}</span></p>
@@ -31,8 +30,7 @@
     <form method="post">
         {% csrf_token %}
         <input type="hidden" name="action" value="simulate_threshold_change">
-        <input type="text" name="use_case_id" placeholder="use_case_id" required>
-        <input type="text" name="bucket" placeholder="bucket e.g. human_review" required>
+        <input type="text" name="bucket" placeholder="bucket e.g. verify_warning" required>
         <input type="text" name="dimension" placeholder="dimension" required>
         <input type="number" step="1" name="new_threshold" placeholder="proposed threshold" required>
         <input type="number" name="days" value="7">
@@ -40,11 +38,15 @@
     </form>
     {% if simulation %}
     <div id="simulation-result">
-        <p>Current threshold: {{ simulation.current_threshold }} &rarr; Proposed: {{ simulation.proposed_threshold }}</p>
-        <p>Flags before: <span id="sim-flags-before">{{ simulation.flags_before }}</span>,
-           after: <span id="sim-flags-after">{{ simulation.flags_after }}</span></p>
-        <p>Reduction: <span id="sim-reduction-pct">{{ simulation.reduction_pct }}</span>%</p>
-        <p>Potentially missed confirmed issues: <span id="sim-missed-confirmed-issues">{{ simulation.missed_confirmed_issues }}</span></p>
+        {% if simulation.not_configured %}
+            <p class="error">This bucket/dimension is not configured — nothing to simulate.</p>
+        {% else %}
+            <p>Current threshold: {{ simulation.current_threshold }} &rarr; Proposed: {{ simulation.proposed_threshold }}</p>
+            <p>Flags before: <span id="sim-flags-before">{{ simulation.flags_before }}</span>,
+               after: <span id="sim-flags-after">{{ simulation.flags_after }}</span></p>
+            <p>Reduction: <span id="sim-reduction-pct">{{ simulation.reduction_pct }}</span>%</p>
+            <p>Potentially missed confirmed issues: <span id="sim-missed-confirmed-issues">{{ simulation.missed_confirmed_issues }}</span></p>
+        {% endif %}
     </div>
     {% endif %}
 </div>
@@ -54,7 +56,6 @@
     <form method="post">
         {% csrf_token %}
         <input type="hidden" name="action" value="propose_threshold">
-        <input type="text" name="use_case_id" placeholder="use_case_id" required>
         <input type="text" name="bucket" placeholder="bucket" required>
         <input type="text" name="dimension" placeholder="dimension" required>
         <input type="number" name="current_threshold" placeholder="current threshold" required>
@@ -68,12 +69,12 @@
 <div class="card">
     <h3>Pending proposals</h3>
     <table id="pending-proposals-table">
-        <thead><tr><th>Use case</th><th>Bucket</th><th>Dimension</th><th>Current</th><th>Proposed</th></tr></thead>
+        <thead><tr><th>Bucket</th><th>Dimension</th><th>Current</th><th>Proposed</th></tr></thead>
         <tbody>
         {% for p in pending_proposals %}
-            <tr><td>{{ p.use_case_id }}</td><td>{{ p.bucket }}</td><td>{{ p.dimension }}</td><td>{{ p.current_threshold }}</td><td>{{ p.proposed_threshold }}</td></tr>
+            <tr><td>{{ p.bucket }}</td><td>{{ p.dimension }}</td><td>{{ p.current_threshold }}</td><td>{{ p.proposed_threshold }}</td></tr>
         {% empty %}
-            <tr><td colspan="5">No pending proposals.</td></tr>
+            <tr><td colspan="4">No pending proposals.</td></tr>
         {% endfor %}
         </tbody>
     </table>
@@ -86,7 +87,6 @@
         <input type="hidden" name="action" value="report_false_positive">
         <input type="text" name="trace_id" placeholder="trace id (request_id)" required>
         <input type="text" name="dimension" placeholder="dimension" required>
-        <input type="text" name="reported_by" placeholder="reported by" required>
         <input type="text" name="reason" placeholder="reason">
         <button type="submit">Report</button>
     </form>

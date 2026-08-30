@@ -2,33 +2,139 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}ControlPlane.ai Dashboard{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
     <style>
-        body { font-family: -apple-system, sans-serif; margin: 0; background: #0f1420; color: #e6e9ef; }
-        nav { background: #161c2c; padding: 12px 24px; display: flex; gap: 20px; }
-        nav a { color: #9fb3ff; text-decoration: none; font-size: 14px; }
-        nav a.active { color: #fff; font-weight: 600; }
-        main { padding: 24px; max-width: 1100px; margin: 0 auto; }
-        .card { background: #161c2c; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+        :root {
+            --bg: #ffffff;
+            --bg-secondary: #f7f7f7;
+            --bg-hover: #ececec;
+            --border: #e5e5e5;
+            --border-strong: #d9d9d9;
+            --text-primary: #171717;
+            --text-secondary: #6b6b6b;
+            --text-tertiary: #9b9b9b;
+            --accent: #171717;
+            --accent-hover: #333333;
+            --danger: #ae2f22;
+            --danger-bg: #fdecec;
+            --success: #1a7f37;
+            --success-bg: #ecfdf3;
+            --warning: #92600a;
+            --warning-bg: #fff8e6;
+            --purple: #6941c6;
+            --purple-bg: #f5f0ff;
+            --radius-sm: 8px;
+            --radius-md: 12px;
+            --radius-lg: 18px;
+            --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        * { box-sizing: border-box; }
+        html, body { height: 100%; }
+        body {
+            margin: 0; font-family: var(--font-sans); background: var(--bg); color: var(--text-primary);
+            font-size: 14px; line-height: 1.55; -webkit-font-smoothing: antialiased;
+        }
+        h1, h2, h3 { font-weight: 600; letter-spacing: -0.01em; margin: 0 0 6px; }
+        h1 { font-size: 20px; }
+        h3 { font-size: 14px; }
+        p { margin: 0 0 8px; }
+        a { color: inherit; }
+
+        nav {
+            display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+            background: var(--bg); border-bottom: 1px solid var(--border);
+            padding: 12px 28px;
+        }
+        nav a {
+            color: var(--text-secondary); text-decoration: none; font-size: 13.5px; font-weight: 500;
+            padding: 7px 12px; border-radius: var(--radius-sm);
+            transition: background-color .12s ease, color .12s ease;
+        }
+        nav a:hover { color: var(--text-primary); background: var(--bg-hover); }
+        nav a.active { color: var(--text-primary); background: var(--bg-secondary); font-weight: 600; }
+        nav .spacer { flex: 1; }
+        nav .nav-identity { color: var(--text-tertiary); font-size: 12.5px; padding: 0 6px; }
+
+        main { padding: 32px 28px; max-width: 1100px; margin: 0 auto; }
+
+        .card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 20px; margin-bottom: 16px; }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
-        .stat { font-size: 28px; font-weight: 700; }
-        .label { font-size: 12px; color: #9aa4b8; text-transform: uppercase; }
-        table { width: 100%; border-collapse: collapse; font-size: 14px; }
-        th, td { text-align: left; padding: 8px; border-bottom: 1px solid #232b3f; }
+        .stat { font-size: 26px; font-weight: 600; color: var(--text-primary); letter-spacing: -0.01em; }
+        .label { font-size: 11.5px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; font-weight: 500; }
+
+        table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+        th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
+        th { color: var(--text-secondary); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+        tr:last-child td { border-bottom: none; }
+
         form.inline { display: inline; }
-        input, select, textarea, button { background: #0f1420; color: #e6e9ef; border: 1px solid #2a3348; border-radius: 4px; padding: 6px; }
-        button { cursor: pointer; background: #3a5cff; border-color: #3a5cff; }
-        .error { color: #ff6b6b; }
-        .message { color: #6bffb0; }
+        input, select, textarea {
+            background: var(--bg); color: var(--text-primary); border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm); padding: 8px 10px; font-family: inherit; font-size: 13.5px;
+            transition: border-color .12s ease, box-shadow .12s ease;
+        }
+        input::placeholder, textarea::placeholder { color: var(--text-tertiary); }
+        input:focus, select:focus, textarea:focus {
+            outline: none; border-color: var(--text-tertiary); box-shadow: 0 0 0 3px rgba(23, 23, 23, 0.06);
+        }
+        button {
+            cursor: pointer; background: var(--accent); color: #fff; border: 1px solid var(--accent);
+            border-radius: var(--radius-sm); padding: 8px 14px; font-family: inherit; font-size: 13.5px; font-weight: 500;
+            transition: background-color .12s ease;
+        }
+        button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+        .error { color: var(--danger); }
+        .message { color: var(--success); }
+
+        .linklike {
+            background: none; border: none; color: var(--text-secondary); text-decoration: none;
+            font-size: 13.5px; font-weight: 500; padding: 7px 12px; border-radius: var(--radius-sm);
+            cursor: pointer; font-family: inherit;
+        }
+        .linklike:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+        .status-pill {
+            font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; padding: 2px 9px;
+            border-radius: 999px; font-weight: 600; display: inline-block;
+        }
+        .status-allow { background: var(--success-bg); color: var(--success); }
+        .status-modify { background: var(--warning-bg); color: var(--warning); }
+        .status-block { background: var(--danger-bg); color: var(--danger); }
+        .status-human_review { background: var(--purple-bg); color: var(--purple); }
+        .status-pending { background: var(--bg-secondary); color: var(--text-secondary); }
+        .status-approved { background: var(--success-bg); color: var(--success); }
+        .status-modified { background: var(--warning-bg); color: var(--warning); }
+        .status-rejected { background: var(--danger-bg); color: var(--danger); }
+        .status-failed { background: var(--danger-bg); color: var(--danger); }
     </style>
+    {% block extra_head %}{% endblock %}
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
 <nav>
-    <a href="{% url 'dashboard-home' %}">Overview</a>
-    <a href="{% url 'dashboard-trends' %}">Trends</a>
-    <a href="{% url 'human-review-queue' %}">Human Review Queue</a>
-    <a href="{% url 'fpr-tuning' %}">FPR Tuning</a>
+    {% if user.is_authenticated %}
+        <a href="{% url 'playground' %}" class="{% if request.resolver_match.url_name == 'playground' %}active{% endif %}">Playground</a>
+        {% if is_manager %}
+            <a href="{% url 'dashboard-home' %}" class="{% if request.resolver_match.url_name == 'dashboard-home' %}active{% endif %}">Overview</a>
+            <a href="{% url 'dashboard-trends' %}" class="{% if request.resolver_match.url_name == 'dashboard-trends' %}active{% endif %}">Trends</a>
+            <a href="{% url 'human-review-queue' %}" class="{% if request.resolver_match.url_name == 'human-review-queue' %}active{% endif %}">Human Review Queue</a>
+        {% endif %}
+        <span class="spacer"></span>
+        <span class="nav-identity">{{ user.first_name|default:user.username|capfirst }} &middot; {% if is_manager %}Manager{% else %}Employee{% endif %}</span>
+        <form method="post" action="{% url 'logout' %}" class="inline">
+            {% csrf_token %}
+            <button type="submit" class="linklike">Log out</button>
+        </form>
+    {% else %}
+        <span class="spacer"></span>
+        <a href="{% url 'login' %}" class="{% if request.resolver_match.url_name == 'login' %}active{% endif %}">Log in</a>
+        <a href="{% url 'register' %}" class="{% if request.resolver_match.url_name == 'register' %}active{% endif %}">Register</a>
+    {% endif %}
 </nav>
 <main>
 {% block content %}{% endblock %}

@@ -1,0 +1,33 @@
+{% extends "core/base.html" %}
+{% block title %}Log in — ControlPlane.ai{% endblock %}
+{% block content %}
+<style>
+    .auth-shell { max-width: 400px; margin: 64px auto 0; }
+    .auth-shell h1 { text-align: center; margin-bottom: 24px; }
+    .auth-shell .card { padding: 28px; }
+    .auth-shell .card form { display: flex; flex-direction: column; gap: 14px; }
+    .auth-shell label { font-size: 13px; color: var(--text-secondary); font-weight: 500; display: flex; flex-direction: column; gap: 6px; }
+    .auth-shell input { width: 100%; box-sizing: border-box; padding: 9px 11px; }
+    .auth-shell .switch-link { text-align: center; font-size: 13px; color: var(--text-secondary); margin-top: 16px; }
+    .auth-shell button[type="submit"] { margin-top: 4px; padding: 10px 14px; }
+</style>
+
+<div class="auth-shell">
+    <h1>Log in</h1>
+    <div class="card">
+        {% if error %}<p class="error">{{ error }}</p>{% endif %}
+        <form method="post">
+            {% csrf_token %}
+            <input type="hidden" name="next" value="{{ next }}">
+            <label>Email
+                <input type="email" name="email" value="{{ email_value }}" required autofocus>
+            </label>
+            <label>Password
+                <input type="password" name="password" required>
+            </label>
+            <button type="submit">Log in</button>
+        </form>
+        <div class="switch-link">No account yet? <a href="{% url 'register' %}">Register</a></div>
+    </div>
+</div>
+{% endblock %}

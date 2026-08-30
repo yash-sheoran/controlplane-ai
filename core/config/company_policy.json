@@ -1,0 +1,115 @@
+{
+  "policy_name": "AI Human Review Policy",
+  "version": "1.0",
+
+  "default_action": "ALLOW",
+
+  "human_review_policy": {
+    "enabled": true,
+
+    "categories": {
+      "high_stakes_professional_advice": {
+        "enabled": true,
+        "risk_level": "HIGH",
+        "description": "Requests involving professional advice where an incorrect response could have significant consequences.",
+        "examples": [
+          "Legal advice",
+          "Court or litigation matters",
+          "Professional regulatory advice"
+        ],
+        "action": "HUMAN_REVIEW"
+      },
+
+      "medical_and_health": {
+        "enabled": true,
+        "risk_level": "HIGH",
+        "description": "Requests involving medical diagnosis, treatment, medication, or significant health decisions.",
+        "examples": [
+          "Diagnosing a medical condition",
+          "Recommending medication",
+          "Interpreting medical symptoms"
+        ],
+        "action": "HUMAN_REVIEW"
+      },
+
+      "financial_decisions": {
+        "enabled": true,
+        "risk_level": "HIGH",
+        "description": "Requests involving significant financial decisions or personalized financial recommendations.",
+        "examples": [
+          "Investment recommendations",
+          "Major financial decisions",
+          "Recommendations involving significant financial risk"
+        ],
+        "action": "HUMAN_REVIEW"
+      },
+
+      "employment_and_hiring": {
+        "enabled": true,
+        "risk_level": "HIGH",
+        "description": "Requests involving hiring, firing, candidate evaluation, employee evaluation, or other employment decisions.",
+        "examples": [
+          "Ranking candidates",
+          "Choosing who to hire",
+          "Deciding whether an employee should be fired"
+        ],
+        "action": "HUMAN_REVIEW"
+      },
+
+      "sensitive_personal_information": {
+        "enabled": true,
+        "risk_level": "HIGH",
+        "description": "Requests involving highly sensitive personal information or decisions based on such information.",
+        "examples": [
+          "Medical records",
+          "Sensitive personal data",
+          "Requests to evaluate a person using sensitive information"
+        ],
+        "action": "HUMAN_REVIEW"
+      },
+
+      "minors": {
+        "enabled": true,
+        "risk_level": "HIGH",
+        "description": "Sensitive, harmful, or consequential requests involving children or minors.",
+        "examples": [
+          "Sensitive issues involving minors",
+          "Medical decisions involving minors",
+          "High-impact decisions involving minors"
+        ],
+        "action": "HUMAN_REVIEW"
+      },
+
+      "high_impact_personal_decisions": {
+        "enabled": true,
+        "risk_level": "MEDIUM",
+        "description": "Requests asking AI to make or strongly recommend major personal decisions that may have significant or irreversible consequences.",
+        "examples": [
+          "Divorce decisions",
+          "Dropping out of education",
+          "Major relationship decisions",
+          "Other irreversible life decisions"
+        ],
+        "action": "HUMAN_REVIEW"
+      }
+    }
+  },
+
+  "custom_rules": [
+    {
+      "name": "CUSTOM_RULE_NAME",
+      "enabled": false,
+      "description": "Company-defined condition that requires human review.",
+      "examples": [],
+      "risk_level": "MEDIUM",
+      "action": "HUMAN_REVIEW"
+    }
+  ],
+
+  "review_settings": {
+    "allow_user_override": false,
+    "allow_reviewer_edit": true,
+    "allow_reviewer_reject": true,
+    "require_reason": true
+  }
+}

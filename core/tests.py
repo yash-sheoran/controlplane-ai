@@ -4,6 +4,7 @@ import uuid
 from unittest.mock import patch
 
 from django.contrib import admin
+from django.contrib.auth.models import User
 from django.test import TestCase
 
 from . import agentic_gate as ag
@@ -18,15 +19,31 @@ from . import session_risk as sr
 from .models import (
     AuditRecord,
     FalsePositiveReport,
-    PolicyConfig,
     ReviewerAction,
     SessionState,
     ThresholdChangeProposal,
     Trace,
-    UseCaseProfile,
     UserFeedback,
+    UserProfile,
 )
 from .views import SAFE_ERROR_MESSAGE
+
+
+def _make_manager(username, password="testpass123!"):
+    """Test helper: a manager account whose team-scoped dashboard views
+    (core.dashboard_views, gated by core.authz.manager_required) will see
+    Trace/AuditRecord rows created with user_id=username — i.e. the
+    manager's own team, per core.authz.team_user_ids, is themselves plus
+    any employee profiles pointing back at them."""
+    user = User.objects.create_user(username=username, email=f"{username}@example.com", password=password)
+    UserProfile.objects.create(user=user, role=UserProfile.ROLE_MANAGER)
+    return user
+
+
+def _make_employee(username, manager_user, password="testpass123!"):
+    user = User.objects.create_user(username=username, email=f"{username}@example.com", password=password)
+    UserProfile.objects.create(user=user, role=UserProfile.ROLE_EMPLOYEE, manager=manager_user.profile)
+    return user
 
 
 class HealthCheckTests(TestCase):
@@ -44,7 +61,7 @@ class CoreModelsRegisteredInAdminTests(TestCase):
     the Django admin site, so they are visible/manageable there."""
 
     def test_all_core_models_registered(self):
-        for model in (UseCaseProfile, PolicyConfig, Trace, SessionState, AuditRecord):
+        for model in (Trace, SessionState, AuditRecord):
             self.assertIn(model, admin.site._registry, f"{model.__name__} not registered in admin")
 
 
@@ -52,8 +69,6 @@ class CoreModelsEmptyOnFreshMigrationTests(TestCase):
     """On a freshly migrated test database, every core table starts empty."""
 
     def test_tables_start_empty(self):
-        self.assertEqual(UseCaseProfile.objects.count(), 0)
-        self.assertEqual(PolicyConfig.objects.count(), 0)
         self.assertEqual(Trace.objects.count(), 0)
         self.assertEqual(SessionState.objects.count(), 0)
         self.assertEqual(AuditRecord.objects.count(), 0)
@@ -63,37 +78,9 @@ class CoreModelsRelationshipTests(TestCase):
     """Sanity-checks the relationships and fields declared on the core models
     against the architecture doc's schemas (Section 5.1, 6.1, 6.3, 14.1, 14.2)."""
 
-    def setUp(self):
-        self.use_case = UseCaseProfile.objects.create(
-            use_case_id="DecisionSupport",
-            name="Decision Support",
-            geography=["IN", "EU"],
-            regulations=["DPDP", "GDPR"],
-            model_tier_preference="high",
-            session_risk_window=5,
-            audit_retention_days=90,
-        )
-
-    def test_policy_config_tied_to_use_case(self):
-        policy = PolicyConfig.objects.create(
-            use_case_profile=self.use_case,
-            version="1.2",
-            thresholds={
-                "block": {"data_leakage_risk": 8, "safety_risk": 8},
-                "human_review": {"safety_risk": 7},
-                "modify": {"data_leakage_risk": 5},
-                "verify": {"hallucination_risk": 6},
-            },
-            max_retries=2,
-            latency_budget_ms=8000,
-        )
-        self.assertEqual(self.use_case.policy_configs.count(), 1)
-        self.assertEqual(policy.thresholds["block"]["safety_risk"], 8)
-
     def test_trace_opens_with_uuid_and_open_status(self):
         trace = Trace.objects.create(
             user_id="user-1",
-            use_case=self.use_case,
             raw_prompt="What is the loan approval policy?",
             client_metadata={"channel": "web"},
         )
@@ -103,7 +90,6 @@ class CoreModelsRelationshipTests(TestCase):
 
     def test_session_state_tracks_accumulator_and_history(self):
         session = SessionState.objects.create(
-            use_case=self.use_case,
             turn_number=3,
             session_risk_accumulator=1.9,
             previous_decisions=["ALLOW", "ALLOW"],
@@ -114,7 +100,6 @@ class CoreModelsRelationshipTests(TestCase):
     def test_audit_record_one_to_one_with_trace(self):
         trace = Trace.objects.create(
             user_id="user-1",
-            use_case=self.use_case,
             raw_prompt="Summarise this contract.",
         )
         record = AuditRecord.objects.create(
@@ -134,7 +119,7 @@ class CoreModelsRelationshipTests(TestCase):
 class RequestIngestionAPITests(TestCase):
     """Section 3 Step 1 — Request Ingestion & Trace Initialisation.
 
-    Inputs: raw_prompt, user_id, session_id, use_case_id, client_metadata
+    Inputs: raw_prompt, user_id, session_id, client_metadata
     Outputs: request_id (UUID), trace_object (open), timestamp
     Failure: all failures in this step result in a 503 with a safe error
     message; the trace is never lost.
@@ -143,17 +128,11 @@ class RequestIngestionAPITests(TestCase):
     url = "/api/requests/"
 
     def setUp(self):
-        self.use_case = UseCaseProfile.objects.create(
-            use_case_id="CustomerSupport",
-            name="Customer Support",
-            model_tier_preference="mid",
-        )
         self.session_id = str(uuid.uuid4())
         self.valid_payload = {
             "raw_prompt": "What is your refund policy?",
             "user_id": "user-42",
             "session_id": self.session_id,
-            "use_case_id": "CustomerSupport",
             "client_metadata": {"channel": "web"},
         }
 
@@ -182,7 +161,6 @@ class RequestIngestionAPITests(TestCase):
         self.assertEqual(trace.raw_prompt, self.valid_payload["raw_prompt"])
         self.assertEqual(trace.user_id, self.valid_payload["user_id"])
         self.assertEqual(str(trace.session_id), self.session_id)
-        self.assertEqual(trace.use_case, self.use_case)
         self.assertEqual(trace.client_metadata, {"channel": "web"})
         self.assertEqual(trace.status, Trace.STATUS_CLOSED)
         self.assertEqual(trace.final_decision, "ALLOW")
@@ -248,24 +226,6 @@ class RequestIngestionAPITests(TestCase):
         response = self.post(payload)
         self.assertEqual(response.status_code, 503)
 
-    def test_missing_use_case_id_returns_503(self):
-        payload = dict(self.valid_payload)
-        del payload["use_case_id"]
-        response = self.post(payload)
-        self.assertEqual(response.status_code, 503)
-
-    def test_unknown_use_case_id_returns_503(self):
-        payload = dict(self.valid_payload)
-        payload["use_case_id"] = "DoesNotExist"
-        response = self.post(payload)
-        self.assertEqual(response.status_code, 503)
-
-    def test_inactive_use_case_profile_returns_503(self):
-        self.use_case.is_active = False
-        self.use_case.save()
-        response = self.post(self.valid_payload)
-        self.assertEqual(response.status_code, 503)
-
     def test_client_metadata_wrong_type_returns_503(self):
         payload = dict(self.valid_payload)
         payload["client_metadata"] = "not-a-dict"
@@ -292,7 +252,6 @@ class RequestIngestionAPITests(TestCase):
             {},
             {"raw_prompt": "hi"},
             {**self.valid_payload, "session_id": "bad"},
-            {**self.valid_payload, "use_case_id": "Nope"},
         ]
         for payload in bad_payloads:
             self.post(payload)
@@ -452,29 +411,6 @@ class RiskScoreTests(TestCase):
             pii_detected=True,
         )
         self.assertTrue(9 <= score <= 10)
-
-
-class UseCaseClassificationTests(TestCase):
-    """Section 3 Step 2, 2D — Use-Case Classification into the 3 baseline
-    profiles (CustomerSupport, InternalKnowledge, DecisionSupport)."""
-
-    def test_customer_support_prompt_classified_correctly(self):
-        result = pra.classify_use_case("I want a refund for my order, it never arrived.")
-        self.assertEqual(result, "CustomerSupport")
-
-    def test_internal_knowledge_prompt_classified_correctly(self):
-        result = pra.classify_use_case("What is our internal HR policy on parental leave?")
-        self.assertEqual(result, "InternalKnowledge")
-
-    def test_decision_support_prompt_classified_correctly(self):
-        result = pra.classify_use_case(
-            "Should we approve this loan application given the applicant's credit history?"
-        )
-        self.assertEqual(result, "DecisionSupport")
-
-    def test_ambiguous_prompt_returns_none_rather_than_guessing(self):
-        result = pra.classify_use_case("What's the weather like today?")
-        self.assertIsNone(result)
 
 
 class ModelRouterTests(TestCase):
@@ -712,23 +648,21 @@ class AuditPromptStructureTests(TestCase):
         prompt = ae.build_audit_prompt(
             original_prompt="What is our refund policy?",
             ai_response="You can request a refund within 30 days.",
-            use_case_profile="CustomerSupport",
             conversation_history_summary="First turn.",
             pre_request_flags={"pii_detected_in_prompt": False},
         )
         self.assertIn("evaluate the following AI-generated response", prompt["system"])
         self.assertEqual(prompt["user"]["original_prompt"], "What is our refund policy?")
         self.assertEqual(prompt["user"]["ai_response"], "You can request a refund within 30 days.")
-        self.assertEqual(prompt["user"]["use_case_profile"], "CustomerSupport")
         self.assertEqual(prompt["user"]["conversation_history_summary"], "First turn.")
         self.assertEqual(prompt["user"]["pre_request_flags"], {"pii_detected_in_prompt": False})
 
     def test_pre_request_flags_defaults_to_empty_dict(self):
-        prompt = ae.build_audit_prompt("p", "r", "CustomerSupport")
+        prompt = ae.build_audit_prompt("p", "r")
         self.assertEqual(prompt["user"]["pre_request_flags"], {})
 
     def test_escalated_prompt_names_the_previous_failure_and_differs_from_base(self):
-        base = ae.build_audit_prompt("p", "r", "CustomerSupport")
+        base = ae.build_audit_prompt("p", "r")
         escalated = ae.build_escalated_audit_prompt(base, ["Missing required field: correctness_score"])
         self.assertIn("Missing required field: correctness_score", escalated["system"])
         self.assertNotEqual(escalated["system"], base["system"])
@@ -868,7 +802,6 @@ class AuditingEngineOrchestrationTests(TestCase):
         return ae.run_auditing_engine(
             original_prompt="What is our refund policy?",
             ai_response="You can request a refund within 30 days.",
-            use_case_profile="CustomerSupport",
             **kwargs,
         )
 
@@ -969,39 +902,48 @@ def _safe_scores(**overrides):
 
 class PolicyEngineYAMLLoadingTests(TestCase):
     """Section 5.1 / Section 3 Step 8 callout: thresholds are stored in a
-    per-use-case YAML policy file."""
+    single, system-wide YAML policy file."""
 
-    def test_decision_support_config_matches_the_documents_literal_example(self):
-        config = pe.load_policy_config("DecisionSupport")
-        self.assertEqual(config["use_case_id"], "DecisionSupport")
-        self.assertEqual(config["geography"], ["IN", "EU"])
+    def test_policy_config_matches_the_documents_literal_example(self):
+        config = pe.load_policy_config()
+        # block/modify are byte-for-byte the document's own literal example
+        # (Section 5.1) MINUS toxicity_risk (later relocated out of block —
+        # see below); verify_warning/verify carry that same literal example
+        # PLUS an explicit, later product extension wiring in the 6 audit
+        # dimensions the document's example never mentions at all
+        # (bias_risk/prompt_injection_risk, and the 4 non-hallucination
+        # quality dimensions) — see DecisionSupport.yaml's own header note.
         self.assertEqual(
-            config["thresholds"],
+            config["thresholds"]["block"],
+            {"data_leakage_risk": 8, "safety_risk": 8},
+        )
+        # Renamed from the document's own "human_review" (LATER product
+        # decision: Human Review is now decided only by the prompt-time
+        # company-policy audit, never by anything in this file — this
+        # bucket is consulted only for non-gating Verify-warning labels;
+        # see this file's own header note). toxicity_risk moved here from
+        # `block` at the same threshold, per that same later decision.
+        self.assertEqual(
+            config["thresholds"]["verify_warning"],
             {
-                "block": {"data_leakage_risk": 8, "safety_risk": 8, "toxicity_risk": 9},
-                "human_review": {"safety_risk": 7, "policy_violation_risk": 7, "hallucination_risk": 8},
-                "modify": {"data_leakage_risk": 5, "pii_detected": True},
-                "verify": {"hallucination_risk": 6, "correctness": 5},
+                "safety_risk": 7, "policy_violation_risk": 7, "hallucination_risk": 8,
+                "bias_risk": 7, "prompt_injection_risk": 7, "toxicity_risk": 9,
+            },
+        )
+        self.assertEqual(
+            config["thresholds"]["modify"],
+            {"data_leakage_risk": 5, "pii_detected": True},
+        )
+        self.assertEqual(
+            config["thresholds"]["verify"],
+            {
+                "hallucination_risk": 6, "correctness": 5,
+                "relevance": 5, "completeness": 5, "instruction_following": 5, "consistency": 5,
             },
         )
         self.assertEqual(config["max_retries"], 2)
         self.assertEqual(config["latency_budget_ms"], 8000)
         self.assertTrue(config["require_human_review_for_final_block"])
-
-    def test_customer_support_config_loads_with_doc_grounded_latency(self):
-        config = pe.load_policy_config("CustomerSupport")
-        self.assertEqual(config["use_case_id"], "CustomerSupport")
-        # Section 3 Step 4: "5 s for CustomerSupport" — the one doc-grounded
-        # value in this placeholder config.
-        self.assertEqual(config["latency_budget_ms"], 5000)
-        for bucket in ("block", "human_review", "modify", "verify"):
-            self.assertIn(bucket, config["thresholds"])
-
-    def test_internal_knowledge_config_loads(self):
-        config = pe.load_policy_config("InternalKnowledge")
-        self.assertEqual(config["use_case_id"], "InternalKnowledge")
-        for bucket in ("block", "human_review", "modify", "verify"):
-            self.assertIn(bucket, config["thresholds"])
 
 
 class PolicyEngineOrderingTests(TestCase):
@@ -1011,7 +953,7 @@ class PolicyEngineOrderingTests(TestCase):
     before HUMAN_REVIEW before MODIFY before VERIFY before ALLOW."""
 
     def setUp(self):
-        self.config = pe.load_policy_config("DecisionSupport")
+        self.config = pe.load_policy_config()
 
     def evaluate(self, scores, context=None):
         return pe.evaluate_policy(self.config, scores, context)
@@ -1022,18 +964,27 @@ class PolicyEngineOrderingTests(TestCase):
         self.assertEqual(result["rules_triggered"], [])
         self.assertEqual(
             result["rules_evaluated"],
-            ["BLOCK_CHECK", "HUMAN_REVIEW_CHECK", "MODIFY_CHECK", "VERIFY_CHECK"],
+            ["BLOCK_CHECK", "MODIFY_CHECK", "VERIFY_CHECK"],
         )
 
     # (score overrides, context, expected_final_action) — each row is a
-    # single-bucket breach in isolation, in priority order.
+    # single-bucket breach in isolation, in priority order. Per product
+    # decision, response-side evaluate_policy can never return
+    # HUMAN_REVIEW any more (see RULE_ORDER's comment) — a score that used
+    # to breach the old human_review bucket now either falls through to
+    # ALLOW (if it doesn't independently breach anything else) or whatever
+    # bucket, if any, it independently breaches (e.g. hallucination_risk
+    # also sits in `verify`).
     SINGLE_BUCKET_CASES = [
         ({"safety_risk_score": 8}, None, "BLOCK"),
         ({"data_leakage_risk_score": 8}, None, "BLOCK"),
-        ({"toxicity_risk_score": 9}, None, "BLOCK"),
-        ({"safety_risk_score": 7}, None, "HUMAN_REVIEW"),
-        ({"policy_violation_risk_score": 7}, None, "HUMAN_REVIEW"),
-        ({"hallucination_risk_score": 8}, None, "HUMAN_REVIEW"),
+        # toxicity_risk moved out of `block` into `verify_warning` (warn-only,
+        # not consulted for routing) — no longer block-capable at any score.
+        ({"toxicity_risk_score": 9}, None, "ALLOW"),
+        ({"safety_risk_score": 7}, None, "ALLOW"),
+        ({"policy_violation_risk_score": 7}, None, "ALLOW"),
+        # Still breaches `verify` independently (hallucination_risk: 6).
+        ({"hallucination_risk_score": 8}, None, "VERIFY"),
         ({"data_leakage_risk_score": 5}, None, "MODIFY"),
         ({}, {"pii_detected": True}, "MODIFY"),
         ({"hallucination_risk_score": 6}, None, "VERIFY"),
@@ -1052,10 +1003,11 @@ class PolicyEngineOrderingTests(TestCase):
                 self.assertEqual(result["final_action"], expected_action)
 
     # (score overrides, context, expected_winner) — each row breaches
-    # MULTIPLE buckets at once; the earlier bucket in BLOCK > HUMAN_REVIEW
-    # > MODIFY > VERIFY must always win.
+    # MULTIPLE buckets at once; the earlier bucket in BLOCK > MODIFY >
+    # VERIFY (RULE_ORDER; human_review no longer participates in this
+    # priority chain at all — see its comment) must always win.
     PRIORITY_CLASH_CASES = [
-        # block + human_review + modify + verify all breached at once -> BLOCK wins
+        # block + modify + verify all breached at once -> BLOCK wins
         (
             {
                 "safety_risk_score": 8, "data_leakage_risk_score": 8,
@@ -1064,15 +1016,17 @@ class PolicyEngineOrderingTests(TestCase):
             },
             None, "BLOCK",
         ),
-        # human_review + modify + verify breached, block not -> HUMAN_REVIEW wins
+        # safety_risk=7 breaches only the now-inert-for-routing
+        # verify_warning bucket (no longer a HUMAN_REVIEW win); modify +
+        # verify are independently breached, and modify precedes verify.
         (
             {
                 "safety_risk_score": 7, "data_leakage_risk_score": 5,
                 "hallucination_risk_score": 6,
             },
-            None, "HUMAN_REVIEW",
+            None, "MODIFY",
         ),
-        # modify + verify breached, block/human_review not -> MODIFY wins
+        # modify + verify breached, block not -> MODIFY wins
         (
             {"data_leakage_risk_score": 5, "hallucination_risk_score": 6},
             None, "MODIFY",
@@ -1096,9 +1050,9 @@ class PolicyEngineOrderingTests(TestCase):
         self.assertEqual(result["rules_evaluated"], ["BLOCK_CHECK"])
         self.assertEqual(result["rules_triggered"], ["BLOCK_CHECK:safety_risk"])
 
-    def test_rules_evaluated_checks_all_four_when_none_fire(self):
+    def test_rules_evaluated_checks_all_three_when_none_fire(self):
         result = self.evaluate(_safe_scores())
-        self.assertEqual(len(result["rules_evaluated"]), 4)
+        self.assertEqual(len(result["rules_evaluated"]), 3)
 
 
 class PolicyEnginePiiFlagTests(TestCase):
@@ -1106,7 +1060,7 @@ class PolicyEnginePiiFlagTests(TestCase):
     true } — a non-numeric, boolean-flag threshold condition."""
 
     def setUp(self):
-        self.config = pe.load_policy_config("DecisionSupport")
+        self.config = pe.load_policy_config()
 
     def test_pii_detected_true_triggers_modify_even_with_safe_scores(self):
         result = pe.evaluate_policy(self.config, _safe_scores(), context={"pii_detected": True})
@@ -1130,7 +1084,7 @@ class CompositeRiskScoreNeverAffectsPolicyDecisionTests(TestCase):
     policy-engine decision input."""
 
     def setUp(self):
-        self.config = pe.load_policy_config("DecisionSupport")
+        self.config = pe.load_policy_config()
 
     def test_extreme_composite_risk_score_does_not_change_the_decision(self):
         scores_without = _safe_scores()
@@ -1147,10 +1101,17 @@ class CompositeRiskScoreNeverAffectsPolicyDecisionTests(TestCase):
         engine's composite score (dashboards) and the policy engine's
         final_action (decisions) are computed from the same dimension
         scores but never influence each other."""
+        # _valid_audit_payload's un-overridden dimensions default to a
+        # deliberately ambiguous 5 (fine for the JSON-validation tests it
+        # exists for), which now sits exactly on DecisionSupport's verify
+        # threshold for the 4 non-hallucination quality dimensions —
+        # explicitly overridden safe here since this test's whole point is
+        # an ALLOW outcome, not a borderline VERIFY one.
         payload = _valid_audit_payload(
             safety_risk_score=1, data_leakage_risk_score=4, toxicity_risk_score=1,
             bias_risk_score=2, policy_violation_risk_score=1, prompt_injection_risk_score=1,
             correctness_score=8, hallucination_risk_score=3,
+            relevance_score=8, completeness_score=8, instruction_following_score=8, consistency_score=8,
         )
         composite = ae.compute_composite_risk_score(payload)
         policy_result = pe.evaluate_policy(self.config, payload)
@@ -1178,16 +1139,21 @@ class AllowPathTests(TestCase):
 class ModifyPathTests(TestCase):
     """Section 3 Step 9 MODIFY."""
 
-    def test_pii_redacted_with_doc_exact_placeholder_labels(self):
+    def test_pii_in_llm_reply_is_never_redacted(self):
+        """Per explicit product decision: an LLM-generated reply is
+        delivered to the user exactly as generated — PII appearing in it
+        is audited (see test_modification_log_records_categories_detected
+        below) but never masked/altered. This only concerns the
+        RESPONSE; PII the user types into their own prompt is still
+        pseudonymized before the model ever sees it (Section 3 Step 2,
+        2A, core.pre_request_analysis), unaffected by this."""
         text = "Contact John Smith at john.smith@example.com for details."
         result = de.execute_modify(text)
 
         self.assertEqual(result["final_decision"], "MODIFY")
-        # Section 9's own two examples: "[REDACTED:EMAIL]", "[REDACTED:NAME]"
-        self.assertIn("[REDACTED:NAME]", result["user_response"])
-        self.assertIn("[REDACTED:EMAIL]", result["user_response"])
-        self.assertNotIn("John Smith", result["user_response"])
-        self.assertNotIn("john.smith@example.com", result["user_response"])
+        self.assertEqual(result["user_response"], text)
+        self.assertIn("John Smith", result["user_response"])
+        self.assertIn("john.smith@example.com", result["user_response"])
 
     def test_disclosure_notice_included_by_default(self):
         result = de.execute_modify("Contact John Smith for details.")
@@ -1197,22 +1163,23 @@ class ModifyPathTests(TestCase):
         result = de.execute_modify("Contact John Smith for details.", disclosure_notice=None)
         self.assertIsNone(result["disclosure_notice"])
 
-    def test_original_content_is_encrypted_and_recoverable(self):
+    def test_encrypt_and_decrypt_original_content_round_trips(self):
+        """execute_modify no longer calls this (nothing is redacted, so
+        there's no separate "original" to protect) — encrypt_original_
+        content/decrypt_original_content are tested directly here as the
+        still-functional utilities they are, kept for any future
+        compliance-logging need."""
         original = "Contact John Smith at john.smith@example.com for details."
-        result = de.execute_modify(original)
-
-        encrypted = result["modification_log"]["original_content_encrypted"]
+        encrypted = de.encrypt_original_content(original)
         self.assertNotEqual(encrypted, original)
         self.assertNotIn("John Smith", encrypted)
-        decrypted = de.decrypt_original_content(encrypted)
-        self.assertEqual(decrypted, original)
+        self.assertEqual(de.decrypt_original_content(encrypted), original)
 
-    def test_modification_log_records_modified_output_and_categories(self):
+    def test_modification_log_records_categories_detected(self):
         result = de.execute_modify("Contact John Smith at john.smith@example.com for details.")
         log = result["modification_log"]
-        self.assertEqual(log["modified_output"], result["user_response"])
-        self.assertIn("PERSON", log["categories_redacted"])
-        self.assertIn("EMAIL", log["categories_redacted"])
+        self.assertIn("PERSON", log["categories_detected"])
+        self.assertIn("EMAIL", log["categories_detected"])
 
     def test_text_with_no_pii_is_returned_unchanged(self):
         text = "The refund window is 30 days."
@@ -1221,71 +1188,68 @@ class ModifyPathTests(TestCase):
 
 
 class HumanReviewPathTests(TestCase):
-    """Section 3 Step 9 HUMAN_REVIEW."""
+    """Section 3 Step 9 HUMAN_REVIEW, prompt-time variant: queued BEFORE
+    any generation call (core.auditing_engine.run_prompt_policy_audit +
+    core.policy_engine.evaluate_prompt_policy decided this prompt matches
+    a company-policy category), so there is never a response to show yet
+    — only APPROVE/REJECT (no MODIFY: nothing exists yet for a reviewer
+    to hand-edit, unlike the old response-stage flow this replaced)."""
 
     def setUp(self):
-        self.audit_json = {"safety_risk_score": 7, "safety_risk_reason": "borderline"}
-        self.result = de.execute_human_review(
-            audit_json=self.audit_json,
-            raw_response="Here is some financial guidance.",
-            redacted_response="Here is some financial guidance.",
-            policy_trigger_reason="human_review threshold breached on 'safety_risk'.",
+        self.violated_policies = ["medical_and_health"]
+        self.result = de.execute_prompt_human_review(
+            reason="The prompt requests personalized medical treatment advice.",
+            violated_policies=self.violated_policies,
         )
 
     def test_queued_case_contains_everything_the_reviewer_needs(self):
         case = self.result["queued_case"]
         self.assertEqual(case["status"], "PENDING")
-        self.assertEqual(case["audit_json"], self.audit_json)
-        self.assertEqual(case["raw_response"], "Here is some financial guidance.")
-        self.assertEqual(case["redacted_response"], "Here is some financial guidance.")
-        self.assertEqual(case["policy_trigger_reason"], "human_review threshold breached on 'safety_risk'.")
+        self.assertEqual(case["violated_policies"], self.violated_policies)
+        self.assertEqual(
+            case["policy_trigger_reason"], "The prompt requests personalized medical treatment advice.",
+        )
+        self.assertIsNone(case["reviewer_id"])
+        self.assertIsNone(case["decision"])
+        self.assertIsNone(case["decided_at"])
+        self.assertIsNone(case["final_user_response"])
 
-    def test_user_is_informed_of_wait_time(self):
-        self.assertIn("30 minutes", self.result["user_response"])
-        self.assertEqual(self.result["estimated_wait_minutes"], 30)
+    def test_user_is_told_to_wait_for_approval(self):
+        self.assertIn("approval", self.result["user_response"].lower())
 
-    def test_reviewer_approve_returns_raw_response_and_is_attributed(self):
-        decided = de.apply_reviewer_decision(
+    def test_reviewer_approve_marks_decided_with_no_response_yet(self):
+        decided = de.apply_prompt_review_decision(
             self.result["queued_case"], decision="APPROVE", reviewer_id="reviewer-1",
         )
         self.assertEqual(decided["status"], "DECIDED")
         self.assertEqual(decided["decision"], "APPROVE")
         self.assertEqual(decided["reviewer_id"], "reviewer-1")
         self.assertIsNotNone(decided["decided_at"])
-        self.assertEqual(decided["final_user_response"], "Here is some financial guidance.")
-
-    def test_reviewer_modify_returns_the_reviewers_edited_text(self):
-        decided = de.apply_reviewer_decision(
-            self.result["queued_case"], decision="MODIFY", reviewer_id="reviewer-1",
-            modified_response="Here is a corrected version of the guidance.",
-        )
-        self.assertEqual(decided["decision"], "MODIFY")
-        self.assertEqual(decided["final_user_response"], "Here is a corrected version of the guidance.")
-
-    def test_reviewer_modify_without_text_raises(self):
-        with self.assertRaises(ValueError):
-            de.apply_reviewer_decision(
-                self.result["queued_case"], decision="MODIFY", reviewer_id="reviewer-1",
-            )
+        # Nothing has been generated yet — that's core.pipeline.
+        # resume_after_prompt_review's job, not this pure function's.
+        self.assertIsNone(decided["final_user_response"])
 
     def test_reviewer_reject_returns_safe_message_and_leaks_nothing(self):
-        decided = de.apply_reviewer_decision(
+        decided = de.apply_prompt_review_decision(
             self.result["queued_case"], decision="REJECT", reviewer_id="reviewer-1",
         )
         self.assertEqual(decided["decision"], "REJECT")
         self.assertEqual(decided["final_user_response"], de.SAFE_BLOCK_MESSAGE)
-        self.assertNotIn("safety_risk", decided["final_user_response"])
+        self.assertNotIn("medical_and_health", decided["final_user_response"])
 
     def test_invalid_decision_value_raises(self):
+        # MODIFY specifically: it was a valid response-stage decision
+        # before this flow moved to the prompt stage, and must now be
+        # rejected just like any other unrecognised value.
         with self.assertRaises(ValueError):
-            de.apply_reviewer_decision(
-                self.result["queued_case"], decision="MAYBE", reviewer_id="reviewer-1",
+            de.apply_prompt_review_decision(
+                self.result["queued_case"], decision="MODIFY", reviewer_id="reviewer-1",
             )
 
     def test_decided_at_can_be_supplied_explicitly_for_deterministic_tests(self):
         import datetime
         fixed_time = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
-        decided = de.apply_reviewer_decision(
+        decided = de.apply_prompt_review_decision(
             self.result["queued_case"], decision="APPROVE", reviewer_id="reviewer-1",
             decided_at=fixed_time,
         )
@@ -1374,7 +1338,7 @@ class VerifyRetryPathTests(TestCase):
         # claude-opus is registered for both "high" and "expert" tiers; already at the top.
         self.assertEqual(de._next_tier_up_model("claude-opus"), "claude-opus")
 
-    def test_exhausting_both_retries_escalates_to_human_review(self):
+    def test_exhausting_both_retries_delivers_the_last_attempt_with_a_warning(self):
         calls = []
 
         def attempt_fn(model_id, enhanced_prompt):
@@ -1383,9 +1347,14 @@ class VerifyRetryPathTests(TestCase):
 
         result = de.execute_verify_retry(attempt_fn, initial_model_id="claude-haiku-4-5", max_retries=2)
         self.assertEqual(len(calls), 2)  # exactly max_retries attempts, no more
-        self.assertEqual(result["final_decision"], "HUMAN_REVIEW")
+        # Per product decision, response-side auditing can never escalate
+        # to HUMAN_REVIEW any more (see core.policy_engine's RULE_ORDER
+        # comment) — the last attempt is delivered as-is, flagged with a
+        # Verify warning instead of being withheld.
+        self.assertEqual(result["final_decision"], "ALLOW")
+        self.assertEqual(result["user_response"], "still bad")
         self.assertEqual(len(result["retry_attempts"]), 2)
-        self.assertEqual(result["queued_case"]["audit_json"], {"x": 1})
+        self.assertTrue(any(w["dimension"] == "retry_exhausted" for w in result["verify_warnings"]))
 
     def test_resolved_outcome_of_modify_is_correctly_dispatched(self):
         def attempt_fn(model_id, enhanced_prompt):
@@ -1393,7 +1362,8 @@ class VerifyRetryPathTests(TestCase):
 
         result = de.execute_verify_retry(attempt_fn, initial_model_id="claude-haiku-4-5", max_retries=2)
         self.assertEqual(result["final_decision"], "MODIFY")
-        self.assertIn("[REDACTED:NAME]", result["user_response"])
+        # Reply content is never redacted — see decision_executor.execute_modify.
+        self.assertEqual(result["user_response"], "Contact John Smith for details.")
 
     def test_resolved_outcome_of_block_is_correctly_dispatched_and_still_leaks_nothing(self):
         def attempt_fn(model_id, enhanced_prompt):
@@ -1417,7 +1387,7 @@ class EndToEndDecisionPathIntegrationTests(TestCase):
     compose correctly end to end."""
 
     def setUp(self):
-        self.policy_config = pe.load_policy_config("DecisionSupport")
+        self.policy_config = pe.load_policy_config()
 
     def test_allow_path(self):
         scores = _safe_scores()
@@ -1428,7 +1398,7 @@ class EndToEndDecisionPathIntegrationTests(TestCase):
         self.assertEqual(result["final_decision"], "ALLOW")
         self.assertEqual(result["user_response"], "The refund window is 30 days.")
 
-    def test_verify_path_escalating_to_human_review(self):
+    def test_verify_path_exhausts_to_allow_with_a_warning(self):
         scores = _safe_scores(hallucination_risk_score=6)  # breaches DecisionSupport's verify threshold
         policy_result = pe.evaluate_policy(self.policy_config, scores)
         self.assertEqual(policy_result["final_action"], "VERIFY")
@@ -1441,7 +1411,10 @@ class EndToEndDecisionPathIntegrationTests(TestCase):
             }
 
         result = de.execute_verify_retry(always_still_verify, initial_model_id="claude-haiku-4-5", max_retries=2)
-        self.assertEqual(result["final_decision"], "HUMAN_REVIEW")
+        # Per product decision, response-side auditing can never escalate
+        # to HUMAN_REVIEW any more (see core.policy_engine's RULE_ORDER
+        # comment) — exhausted retries deliver the last attempt instead.
+        self.assertEqual(result["final_decision"], "ALLOW")
         self.assertEqual(len(result["retry_attempts"]), 2)
 
     def test_modify_path(self):
@@ -1451,23 +1424,27 @@ class EndToEndDecisionPathIntegrationTests(TestCase):
 
         result = de.execute_modify("Contact John Smith at john@example.com for details.")
         self.assertEqual(result["final_decision"], "MODIFY")
-        self.assertIn("[REDACTED:NAME]", result["user_response"])
-        self.assertIn("[REDACTED:EMAIL]", result["user_response"])
+        # Reply content is never redacted — see decision_executor.execute_modify.
+        self.assertEqual(result["user_response"], "Contact John Smith at john@example.com for details.")
 
     def test_human_review_path(self):
-        scores = _safe_scores(safety_risk_score=7)  # breaches DecisionSupport's human_review threshold
-        policy_result = pe.evaluate_policy(self.policy_config, scores)
-        self.assertEqual(policy_result["final_action"], "HUMAN_REVIEW")
+        # Human Review is now decided at the PROMPT stage (core.
+        # auditing_engine.run_prompt_policy_audit + core.policy_engine.
+        # evaluate_prompt_policy) — never by this class's response-side
+        # policy_config, which can no longer produce HUMAN_REVIEW at all.
+        # This proves the prompt-time pairing composes correctly instead.
+        company_policy = pe.load_company_policy()
+        violated_policies = ["medical_and_health"]
+        decision = pe.evaluate_prompt_policy(company_policy, violated_policies)
+        self.assertEqual(decision, "HUMAN_REVIEW")
 
-        result = de.execute_human_review(
-            audit_json=scores,
-            raw_response="Here is some financial guidance.",
-            redacted_response="Here is some financial guidance.",
-            policy_trigger_reason=policy_result["reason"],
+        result = de.execute_prompt_human_review(
+            reason="The prompt requests personalized medical treatment advice.",
+            violated_policies=violated_policies,
         )
         self.assertEqual(result["final_decision"], "HUMAN_REVIEW")
         self.assertEqual(result["queued_case"]["status"], "PENDING")
-        self.assertEqual(result["queued_case"]["policy_trigger_reason"], policy_result["reason"])
+        self.assertEqual(result["queued_case"]["violated_policies"], violated_policies)
 
     def test_block_path(self):
         scores = _safe_scores(data_leakage_risk_score=8)  # breaches DecisionSupport's block threshold
@@ -1559,7 +1536,7 @@ class PolicyEscalationTests(TestCase):
     crosses threshold."""
 
     def setUp(self):
-        self.config = pe.load_policy_config("DecisionSupport")
+        self.config = pe.load_policy_config()
 
     def test_is_escalated_false_below_threshold(self):
         state = {"session_risk_accumulator": 4.9}
@@ -1576,7 +1553,7 @@ class PolicyEscalationTests(TestCase):
     def test_escalation_lowers_higher_is_worse_thresholds(self):
         escalated = sr.escalate_policy_config(self.config, escalation_step=1)
         self.assertEqual(escalated["thresholds"]["block"]["safety_risk"], 7)  # was 8
-        self.assertEqual(escalated["thresholds"]["human_review"]["hallucination_risk"], 7)  # was 8
+        self.assertEqual(escalated["thresholds"]["verify_warning"]["hallucination_risk"], 7)  # was 8
 
     def test_escalation_raises_higher_is_better_thresholds(self):
         escalated = sr.escalate_policy_config(self.config, escalation_step=1)
@@ -1615,17 +1592,21 @@ class BorderlineSessionEscalationIntegrationTests(TestCase):
     built Section 3 Step 8 policy engine (core.policy_engine)."""
 
     def test_borderline_turns_escalate_and_change_the_outcome_of_a_later_turn(self):
-        config = pe.load_policy_config("DecisionSupport")
+        config = pe.load_policy_config()
         session_risk_threshold = config["session_risk_threshold"]  # 5.0
         state = _fresh_session_state()
 
-        # A sequence of individually-borderline turns: safety_risk=6 never
-        # breaches DecisionSupport's own human_review threshold (7) or
-        # block threshold (8) on any single turn, so each turn on its own
-        # would ALLOW. Section 6.1's own callout: "A series of
-        # individually borderline responses can collectively establish a
-        # harmful pattern."
-        borderline_scores = _safe_scores(safety_risk_score=6)
+        # A sequence of individually-borderline turns: correctness=6 never
+        # breaches DecisionSupport's own verify threshold (<= 5) on any
+        # single turn, so each turn on its own would ALLOW. Section 6.1's
+        # own callout: "A series of individually borderline responses can
+        # collectively establish a harmful pattern." (Uses a `verify`-
+        # bucket dimension rather than the old human_review one: per
+        # product decision, evaluate_policy can never produce HUMAN_REVIEW
+        # any more, so escalation can only ever be demonstrated moving a
+        # turn between the buckets that still participate in routing —
+        # here, ALLOW -> VERIFY.)
+        borderline_scores = _safe_scores(correctness_score=6)
         for _ in range(5):
             policy_result = pe.evaluate_policy(config, borderline_scores)
             self.assertEqual(policy_result["final_action"], "ALLOW")  # each turn alone is fine
@@ -1634,7 +1615,7 @@ class BorderlineSessionEscalationIntegrationTests(TestCase):
                 window_size=config["session_risk_window"],
             )
 
-        # After 5 turns of safety_risk=6, the rolling average is exactly 6.0.
+        # After 5 turns of risk_score=6, the rolling average is exactly 6.0.
         self.assertAlmostEqual(state["session_risk_accumulator"], 6.0)
         self.assertTrue(sr.is_escalated(state, session_risk_threshold))
 
@@ -1642,13 +1623,14 @@ class BorderlineSessionEscalationIntegrationTests(TestCase):
         effective_config = sr.get_effective_policy_config(config, state, session_risk_threshold)
         self.assertNotEqual(effective_config, config)
 
-        # The SAME safety_risk=6 turn that always ALLOWed under the
-        # original config now breaches the escalated human_review
-        # threshold (7 - 1 = 6), proving stricter thresholds are applied.
+        # The SAME correctness=6 turn that always ALLOWed under the
+        # original config now breaches the escalated verify threshold
+        # (5 + 1 = 6, higher-is-better raised, not lowered), proving
+        # stricter thresholds are applied.
         next_turn_result_original = pe.evaluate_policy(config, borderline_scores)
         next_turn_result_escalated = pe.evaluate_policy(effective_config, borderline_scores)
         self.assertEqual(next_turn_result_original["final_action"], "ALLOW")
-        self.assertEqual(next_turn_result_escalated["final_action"], "HUMAN_REVIEW")
+        self.assertEqual(next_turn_result_escalated["final_action"], "VERIFY")
 
 
 class AgenticPreActionGateTests(TestCase):
@@ -1719,7 +1701,7 @@ class AgenticPreActionGateTests(TestCase):
         self.assertFalse(entry["rollback_recommended"])
 
 
-def _seed_dashboard_records(use_case):
+def _seed_dashboard_records():
     """5 AuditRecords with hand-computable aggregates, used across the
     dashboard aggregation and view tests below.
 
@@ -1731,22 +1713,24 @@ def _seed_dashboard_records(use_case):
         ("ALLOW", 100, 0.01, "claude-haiku-4-5", 0, 2, 1, 1, 1, []),
         ("ALLOW", 200, 0.02, "claude-sonnet-4-6", 1, 3, 2, 2, 2, []),
         ("VERIFY", 150, 0.015, "claude-haiku-4-5", 1, 7, 3, 1, 1, ["VERIFY_CHECK:hallucination_risk"]),
-        ("HUMAN_REVIEW", 300, 0.03, "claude-opus", 0, 4, 8, 2, 3, ["HUMAN_REVIEW_CHECK:safety_risk"]),
+        # HUMAN_REVIEW is now decided at the prompt stage (see core.
+        # pipeline's module docstring), so its rules_triggered/policy_
+        # trigger_reason wording matches that stage now, not a response-
+        # side dimension breach.
+        ("HUMAN_REVIEW", 300, 0.03, "claude-opus", 0, 4, 8, 2, 3, ["PROMPT_POLICY_CHECK:medical_and_health"]),
         ("BLOCK", 50, 0.005, "claude-haiku-4-5", 0, 2, 9, 1, 9, ["BLOCK_CHECK:data_leakage_risk"]),
     ]
     records = []
     for final_action, latency, cost, model, retries, halluc, safety, bias, leakage, triggered in specs:
-        trace = Trace.objects.create(user_id="u1", use_case=use_case, raw_prompt="hi")
+        trace = Trace.objects.create(user_id="u1", raw_prompt="hi")
         human_review = None
         human_review_status = None
         if final_action == "HUMAN_REVIEW":
             human_review_status = "PENDING"
             human_review = {
                 "status": "PENDING",
-                "audit_json": {},
-                "raw_response": "Here is some financial guidance.",
-                "redacted_response": "Here is some financial guidance.",
-                "policy_trigger_reason": "human_review threshold breached on 'safety_risk'.",
+                "violated_policies": ["medical_and_health"],
+                "policy_trigger_reason": "The prompt requests personalized medical treatment advice.",
                 "reviewer_id": None,
                 "decision": None,
                 "decided_at": None,
@@ -1783,8 +1767,7 @@ class DashboardAggregationTests(TestCase):
     hand-computed expectations from _seed_dashboard_records' fixture."""
 
     def setUp(self):
-        self.use_case = UseCaseProfile.objects.create(use_case_id="CustomerSupport", name="Customer Support")
-        self.records = _seed_dashboard_records(self.use_case)
+        self.records = _seed_dashboard_records()
 
     def test_total_requests(self):
         since = timezone_now_minus_hours(24)
@@ -1830,6 +1813,37 @@ class DashboardAggregationTests(TestCase):
         # data_leakage_risk scores [1,2,1,3,9]; >=7: only the last -> 1
         self.assertEqual(dashboard.data_leakage_attempts(days=7), 1)
 
+    def test_data_leakage_attempts_also_counts_prompt_pii_that_was_modified(self):
+        # Putting PII into the PROMPT (Section 3 Step 2 2A) and getting
+        # MODIFYed as a result counts as a leakage attempt too, even
+        # though the auditor's own data_leakage_risk_score for the
+        # (merely echoed-back) response is low.
+        trace = Trace.objects.create(
+            user_id="u1", raw_prompt="my number is 555-123-4567",
+        )
+        AuditRecord.objects.create(
+            trace=trace,
+            pre_request={"pii_detected_in_prompt": True, "pii_categories": ["PHONE_NUMBER"]},
+            audit_responsibility={"data_leakage_risk_score": 1, "safety_risk_score": 1},
+            final_action="MODIFY",
+        )
+        # +1 over the fixture's existing count of 1 (the BLOCK record with leakage_risk=9).
+        self.assertEqual(dashboard.data_leakage_attempts(days=7), 2)
+
+    def test_data_leakage_attempts_ignores_prompt_pii_that_was_not_modified(self):
+        # PII detected in the prompt but the request wasn't actually
+        # MODIFYed (e.g. some other rule fired first) shouldn't count.
+        trace = Trace.objects.create(
+            user_id="u1", raw_prompt="my number is 555-123-4567",
+        )
+        AuditRecord.objects.create(
+            trace=trace,
+            pre_request={"pii_detected_in_prompt": True},
+            audit_responsibility={"data_leakage_risk_score": 1, "safety_risk_score": 1},
+            final_action="ALLOW",
+        )
+        self.assertEqual(dashboard.data_leakage_attempts(days=7), 1)  # unchanged from the fixture baseline
+
     def test_bias_detection_rate(self):
         # bias_risk scores [1,2,1,2,1]; none >= 7 -> 0%
         self.assertAlmostEqual(dashboard.bias_detection_rate(days=7), 0.0, places=2)
@@ -1860,8 +1874,14 @@ class DashboardViewTests(TestCase):
     hand-computed expectation."""
 
     def setUp(self):
-        self.use_case = UseCaseProfile.objects.create(use_case_id="CustomerSupport", name="Customer Support")
-        self.records = _seed_dashboard_records(self.use_case)
+        self.records = _seed_dashboard_records()
+        # _seed_dashboard_records stamps every Trace with user_id="u1" —
+        # logging in as a manager whose own username is "u1" makes their
+        # team (core.authz.team_user_ids: themselves + reports) exactly
+        # match the fixture, so the hand-computed assertions below are
+        # unaffected by the new team-scoping.
+        self.manager = _make_manager("u1")
+        self.client.force_login(self.manager)
 
     def test_dashboard_home_renders_correct_numbers(self):
         response = self.client.get("/dashboard/")
@@ -1895,21 +1915,56 @@ class DashboardViewTests(TestCase):
         response = self.client.get("/dashboard/fpr-tuning/")
         self.assertEqual(response.status_code, 200)
 
+    def test_anonymous_visitor_is_redirected_to_login(self):
+        self.client.logout()
+        response = self.client.get("/dashboard/")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/accounts/login/", response.url)
+
+    def test_employee_gets_403_on_every_manager_only_page(self):
+        employee = _make_employee("employee-1", self.manager)
+        self.client.force_login(employee)
+        for path in ("/dashboard/", "/dashboard/trends/", "/dashboard/human-review/", "/dashboard/fpr-tuning/"):
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 403, path)
+
+    def test_manager_only_sees_their_own_teams_numbers(self):
+        # A second manager's own, unrelated data must not leak into this
+        # team's Overview/Trends numbers (core.authz.team_user_ids).
+        other_manager = _make_manager("other-manager")
+        for _ in range(3):
+            trace = Trace.objects.create(user_id="other-manager", raw_prompt="hi")
+            AuditRecord.objects.create(trace=trace, final_action="ALLOW")
+
+        response = self.client.get("/dashboard/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["decision_distribution"]["total"], 5)  # unchanged by the other team
+
+        self.client.force_login(other_manager)
+        response = self.client.get("/dashboard/")
+        self.assertEqual(response.context["decision_distribution"]["total"], 3)
+        self.assertEqual(response.context["decision_distribution"]["counts"]["ALLOW"], 3)
+
 
 class HumanReviewDecisionViewTests(TestCase):
     """Test: submit a reviewer decision through the UI/API and assert
     it's persisted as a gold-standard label tied to the original audit
-    record."""
+    record. APPROVE now actually triggers generation for the first time
+    (core.pipeline.resume_after_prompt_review) — under settings.TESTING
+    this resolves deterministically via model_pipeline's own simulated
+    response, so no mocking is needed to exercise that path. There is no
+    MODIFY option any more — nothing exists yet, pre-approval, for a
+    reviewer to hand-edit."""
 
     def setUp(self):
-        self.use_case = UseCaseProfile.objects.create(use_case_id="DecisionSupport", name="Decision Support")
-        self.records = _seed_dashboard_records(self.use_case)
+        self.records = _seed_dashboard_records()
         self.pending_record = next(r for r in self.records if r.final_action == "HUMAN_REVIEW")
+        self.manager = _make_manager("u1")
+        self.client.force_login(self.manager)
 
     def test_approve_decision_persists_as_gold_standard_label(self):
         response = self.client.post("/dashboard/human-review/", {
             "trace_id": str(self.pending_record.trace_id),
-            "reviewer_id": "reviewer-42",
             "decision": "APPROVE",
             "decision_reason": "Looks correct on review.",
         })
@@ -1918,44 +1973,45 @@ class HumanReviewDecisionViewTests(TestCase):
         self.pending_record.refresh_from_db()
         self.assertEqual(self.pending_record.human_review_status, "DECIDED")
         self.assertEqual(self.pending_record.human_review["decision"], "APPROVE")
+        # APPROVE actually generates a response now — there was never one
+        # before approval; settings.TESTING resolves this deterministically.
         self.assertEqual(
             self.pending_record.human_review["final_user_response"],
-            "Here is some financial guidance.",
+            "[simulated response from claude-haiku-4-5]",
         )
+        self.assertEqual(
+            self.pending_record.user_response["content"],
+            "[simulated response from claude-haiku-4-5]",
+        )
+        # final_action stays HUMAN_REVIEW permanently — the honest record
+        # of which gate this request actually went through — even though
+        # a response now exists (see resume_after_prompt_review's own
+        # docstring on why this is deliberate).
+        self.assertEqual(self.pending_record.final_action, "HUMAN_REVIEW")
 
         actions = ReviewerAction.objects.filter(audit_record=self.pending_record)
         self.assertEqual(actions.count(), 1)
         action = actions.first()
-        self.assertEqual(action.reviewer_id, "reviewer-42")
+        # reviewer_id is always the logged-in manager's own username now —
+        # never a client-supplied field (see core.dashboard_views.human_review_queue).
+        self.assertEqual(action.reviewer_id, "u1")
         self.assertEqual(action.decision, "APPROVE")
         self.assertEqual(action.decision_reason, "Looks correct on review.")
-
-    def test_modify_decision_uses_reviewers_text(self):
-        response = self.client.post("/dashboard/human-review/", {
-            "trace_id": str(self.pending_record.trace_id),
-            "reviewer_id": "reviewer-42",
-            "decision": "MODIFY",
-            "modified_response": "Corrected guidance text.",
-        })
-        self.assertEqual(response.status_code, 200)
-        self.pending_record.refresh_from_db()
-        self.assertEqual(self.pending_record.human_review["final_user_response"], "Corrected guidance text.")
-        self.assertEqual(ReviewerAction.objects.get(audit_record=self.pending_record).decision, "MODIFY")
 
     def test_reject_decision_recorded_and_leaks_nothing(self):
         response = self.client.post("/dashboard/human-review/", {
             "trace_id": str(self.pending_record.trace_id),
-            "reviewer_id": "reviewer-42",
             "decision": "REJECT",
         })
         self.assertEqual(response.status_code, 200)
         self.pending_record.refresh_from_db()
         self.assertEqual(self.pending_record.human_review["final_user_response"], de.SAFE_BLOCK_MESSAGE)
+        self.assertEqual(self.pending_record.user_response["content"], de.SAFE_BLOCK_MESSAGE)
+        self.assertNotIn("medical_and_health", self.pending_record.human_review["final_user_response"])
 
     def test_invalid_decision_value_does_not_persist_and_returns_error(self):
         response = self.client.post("/dashboard/human-review/", {
             "trace_id": str(self.pending_record.trace_id),
-            "reviewer_id": "reviewer-42",
             "decision": "MAYBE",
         })
         self.assertEqual(response.status_code, 400)
@@ -1966,21 +2022,81 @@ class HumanReviewDecisionViewTests(TestCase):
     def test_after_decision_case_no_longer_appears_in_pending_queue(self):
         self.client.post("/dashboard/human-review/", {
             "trace_id": str(self.pending_record.trace_id),
-            "reviewer_id": "reviewer-42",
             "decision": "APPROVE",
         })
         response = self.client.get("/dashboard/human-review/")
         self.assertEqual(len(response.context["pending_cases"]), 0)
+
+    def test_cannot_re_decide_an_already_decided_case(self):
+        self.client.post("/dashboard/human-review/", {
+            "trace_id": str(self.pending_record.trace_id),
+            "decision": "APPROVE",
+        })
+        response = self.client.post("/dashboard/human-review/", {
+            "trace_id": str(self.pending_record.trace_id),
+            "decision": "REJECT",
+        })
+        self.assertEqual(response.status_code, 400)
+        self.pending_record.refresh_from_db()
+        # The original APPROVE decision must survive untouched.
+        self.assertEqual(self.pending_record.human_review["decision"], "APPROVE")
+        self.assertEqual(ReviewerAction.objects.filter(audit_record=self.pending_record).count(), 1)
+
+    def test_approve_when_generation_fails_marks_the_case_and_notifies_the_manager(self):
+        with patch("core.pipeline.resume_after_prompt_review", side_effect=Exception("simulated API failure")):
+            response = self.client.post("/dashboard/human-review/", {
+                "trace_id": str(self.pending_record.trace_id),
+                "decision": "APPROVE",
+                "decision_reason": "Looks correct on review.",
+            })
+        self.assertEqual(response.status_code, 502)
+        self.assertIn(de.SAFE_GENERATION_UNAVAILABLE_MESSAGE, response.context["generation_failed_notice"])
+
+        self.pending_record.refresh_from_db()
+        # The reviewer's own decision still stands — only generation failed.
+        self.assertEqual(self.pending_record.human_review_status, "DECIDED")
+        self.assertEqual(self.pending_record.human_review["decision"], "APPROVE")
+        self.assertTrue(self.pending_record.human_review["generation_failed"])
+        self.assertIsNone(self.pending_record.human_review["final_user_response"])
+        self.pending_record.trace.refresh_from_db()
+        self.assertEqual(self.pending_record.trace.status, Trace.STATUS_CLOSED)
+
+        # A case that already failed can't be silently re-approved into a
+        # second, contradictory ReviewerAction either — same guard as any
+        # other already-DECIDED case.
+        retry_response = self.client.post("/dashboard/human-review/", {
+            "trace_id": str(self.pending_record.trace_id),
+            "decision": "APPROVE",
+        })
+        self.assertEqual(retry_response.status_code, 400)
+
+    def test_manager_cannot_decide_a_case_outside_their_team(self):
+        other_manager = _make_manager("other-manager")
+        self.client.force_login(other_manager)
+        response = self.client.post("/dashboard/human-review/", {
+            "trace_id": str(self.pending_record.trace_id),
+            "decision": "APPROVE",
+        })
+        self.assertEqual(response.status_code, 403)
+        self.pending_record.refresh_from_db()
+        self.assertEqual(self.pending_record.human_review_status, "PENDING")
+
+    def test_employee_cannot_reach_human_review_queue(self):
+        employee = _make_employee("employee-1", self.manager)
+        self.client.force_login(employee)
+        response = self.client.get("/dashboard/human-review/")
+        self.assertEqual(response.status_code, 403)
 
 
 class FprTuningViewTests(TestCase):
     """Section 9.3 — Operator Dashboard Alert Tuning View."""
 
     def setUp(self):
-        self.use_case = UseCaseProfile.objects.create(use_case_id="DecisionSupport", name="Decision Support")
+        self.manager = _make_manager("u1")
+        self.client.force_login(self.manager)
 
     def _make_record(self, hallucination_risk_score, rules_triggered):
-        trace = Trace.objects.create(user_id="u1", use_case=self.use_case, raw_prompt="hi")
+        trace = Trace.objects.create(user_id="u1", raw_prompt="hi")
         return AuditRecord.objects.create(
             trace=trace,
             audit_quality={"hallucination_risk_score": hallucination_risk_score, "correctness_score": 8},
@@ -2001,7 +2117,6 @@ class FprTuningViewTests(TestCase):
 
         response = self.client.post("/dashboard/fpr-tuning/", {
             "action": "check_fpr",
-            "use_case_id": "DecisionSupport",
             "dimension": "hallucination_risk",
             "days": "7",
         })
@@ -2025,7 +2140,6 @@ class FprTuningViewTests(TestCase):
 
         response = self.client.post("/dashboard/fpr-tuning/", {
             "action": "simulate_threshold_change",
-            "use_case_id": "DecisionSupport",
             "bucket": "verify",
             "dimension": "hallucination_risk",
             "new_threshold": "8",
@@ -2043,7 +2157,6 @@ class FprTuningViewTests(TestCase):
     def test_propose_threshold_creates_pending_proposal(self):
         response = self.client.post("/dashboard/fpr-tuning/", {
             "action": "propose_threshold",
-            "use_case_id": "DecisionSupport",
             "bucket": "verify",
             "dimension": "hallucination_risk",
             "current_threshold": "6",
@@ -2053,7 +2166,6 @@ class FprTuningViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         proposal = ThresholdChangeProposal.objects.get()
         self.assertEqual(proposal.status, "PENDING")
-        self.assertEqual(proposal.use_case_id, "DecisionSupport")
         self.assertEqual(proposal.proposed_threshold, 8.0)
 
     def test_report_false_positive_creates_report(self):
@@ -2062,21 +2174,41 @@ class FprTuningViewTests(TestCase):
             "action": "report_false_positive",
             "trace_id": str(record.trace_id),
             "dimension": "hallucination_risk",
-            "reported_by": "op-1",
             "reason": "Manually verified as correct.",
         })
         self.assertEqual(response.status_code, 200)
         report = FalsePositiveReport.objects.get()
         self.assertEqual(report.audit_record_id, record.trace_id)
         self.assertEqual(report.dimension, "hallucination_risk")
+        # reported_by is always the logged-in manager's own username now —
+        # never a client-supplied field (see core.dashboard_views.fpr_tuning).
+        self.assertEqual(report.reported_by, "u1")
+
+    def test_manager_cannot_report_false_positive_outside_their_team(self):
+        record = self._make_record(7, ["VERIFY_CHECK:hallucination_risk"])
+        other_manager = _make_manager("other-manager")
+        self.client.force_login(other_manager)
+        response = self.client.post("/dashboard/fpr-tuning/", {
+            "action": "report_false_positive",
+            "trace_id": str(record.trace_id),
+            "dimension": "hallucination_risk",
+            "reason": "Not my team's case.",
+        })
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(FalsePositiveReport.objects.count(), 0)
+
+    def test_employee_cannot_reach_fpr_tuning(self):
+        employee = _make_employee("employee-1", self.manager)
+        self.client.force_login(employee)
+        response = self.client.get("/dashboard/fpr-tuning/")
+        self.assertEqual(response.status_code, 403)
 
 
 class ThumbsDownViewTests(TestCase):
     """Section 7.1 User Thumbs-Down."""
 
     def setUp(self):
-        self.use_case = UseCaseProfile.objects.create(use_case_id="CustomerSupport", name="Customer Support")
-        self.trace = Trace.objects.create(user_id="u1", use_case=self.use_case, raw_prompt="hi")
+        self.trace = Trace.objects.create(user_id="u1", raw_prompt="hi")
 
     def test_thumbs_down_creates_feedback_row(self):
         response = self.client.post(
@@ -2115,6 +2247,520 @@ class ThumbsDownViewTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 201)
+
+
+class RegistrationAndLoginTests(TestCase):
+    """Registration/login (core/auth_views.py) and the role+manager
+    mapping it creates (core/models.py UserProfile)."""
+
+    def setUp(self):
+        self.manager = _make_manager("manager-1")
+
+    def test_manager_can_register(self):
+        response = self.client.post("/accounts/register/", {
+            "name": "Alice Manager",
+            "email": "alice-manager@example.com",
+            "role": "manager",
+            "password": "a-strong-password-1",
+            "confirm_password": "a-strong-password-1",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, "/dashboard/")
+        user = User.objects.get(email="alice-manager@example.com")
+        self.assertEqual(user.profile.role, UserProfile.ROLE_MANAGER)
+        self.assertIsNone(user.profile.manager)
+
+    def test_employee_registration_maps_to_manager_by_email(self):
+        response = self.client.post("/accounts/register/", {
+            "name": "Bob Employee",
+            "email": "bob-employee@example.com",
+            "role": "employee",
+            "manager_email": "manager-1@example.com",
+            "password": "a-strong-password-1",
+            "confirm_password": "a-strong-password-1",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, "/dashboard/playground/")
+        user = User.objects.get(email="bob-employee@example.com")
+        self.assertEqual(user.profile.role, UserProfile.ROLE_EMPLOYEE)
+        self.assertEqual(user.profile.manager, self.manager.profile)
+
+    def test_employee_registration_requires_a_real_manager_email(self):
+        response = self.client.post("/accounts/register/", {
+            "name": "Bob Employee",
+            "email": "bob-employee@example.com",
+            "role": "employee",
+            "manager_email": "no-such-manager@example.com",
+            "password": "a-strong-password-1",
+            "confirm_password": "a-strong-password-1",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("No manager account was found with that email.", response.context["errors"])
+        self.assertFalse(User.objects.filter(email="bob-employee@example.com").exists())
+
+    def test_employee_registration_rejects_an_employee_email_as_manager(self):
+        _make_employee("existing-employee", self.manager)
+        response = self.client.post("/accounts/register/", {
+            "name": "Bob Employee",
+            "email": "bob-employee@example.com",
+            "role": "employee",
+            "manager_email": "existing-employee@example.com",
+            "password": "a-strong-password-1",
+            "confirm_password": "a-strong-password-1",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("No manager account was found with that email.", response.context["errors"])
+
+    def test_registration_rejects_mismatched_passwords(self):
+        response = self.client.post("/accounts/register/", {
+            "name": "Bob Employee",
+            "email": "bob-employee@example.com",
+            "role": "manager",
+            "password": "a-strong-password-1",
+            "confirm_password": "a-different-password-2",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Password and confirmation do not match.", response.context["errors"])
+        self.assertFalse(User.objects.filter(email="bob-employee@example.com").exists())
+
+    def test_registration_rejects_a_duplicate_email(self):
+        response = self.client.post("/accounts/register/", {
+            "name": "Someone Else",
+            "email": "manager-1@example.com",
+            "role": "manager",
+            "password": "a-strong-password-1",
+            "confirm_password": "a-strong-password-1",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("An account with this email already exists.", response.context["errors"])
+
+    def test_registration_rejects_an_overlong_email_instead_of_crashing(self):
+        """Regression test: username=email is stored in auth_user.username
+        (VARCHAR(150)); an email past that length used to reach
+        User.objects.create_user() unvalidated and raise an unhandled
+        MySQL DataError — a 500 that, under DEBUG=True, would dump this
+        view's local variables (including the plaintext password) onto
+        Django's technical error page. See core.auth_views.MAX_EMAIL_LENGTH."""
+        overlong_email = ("a" * 245) + "@x.com"
+        response = self.client.post("/accounts/register/", {
+            "name": "Attacker",
+            "email": overlong_email,
+            "role": "manager",
+            "password": "a-strong-password-1",
+            "confirm_password": "a-strong-password-1",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(any("fewer" in e for e in response.context["errors"]))
+        self.assertFalse(User.objects.filter(email=overlong_email).exists())
+
+    def test_registration_rejects_a_password_matching_the_registrants_own_email(self):
+        """Regression test: validate_password() was previously called
+        without user=, silently disabling AUTH_PASSWORD_VALIDATORS'
+        UserAttributeSimilarityValidator."""
+        response = self.client.post("/accounts/register/", {
+            "name": "Jane Doe",
+            "email": "jane.doe@example.com",
+            "role": "manager",
+            "password": "jane.doe@example.com",
+            "confirm_password": "jane.doe@example.com",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(any("similar" in e.lower() for e in response.context["errors"]))
+        self.assertFalse(User.objects.filter(email="jane.doe@example.com").exists())
+
+    def test_login_with_correct_credentials_succeeds(self):
+        User.objects.create_user(username="carol@example.com", email="carol@example.com", password="a-strong-password-1")
+        UserProfile.objects.create(user=User.objects.get(email="carol@example.com"), role=UserProfile.ROLE_MANAGER)
+        response = self.client.post("/accounts/login/", {
+            "email": "carol@example.com", "password": "a-strong-password-1",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, "/dashboard/")
+
+    def test_login_with_wrong_password_fails(self):
+        response = self.client.post("/accounts/login/", {
+            "email": "manager-1@example.com", "password": "wrong-password",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["error"], "Invalid email or password.")
+
+    def test_logout_requires_post(self):
+        self.client.force_login(self.manager)
+        response = self.client.get("/accounts/logout/")
+        self.assertEqual(response.status_code, 405)
+        response = self.client.post("/accounts/logout/")
+        self.assertEqual(response.status_code, 302)
+
+
+class PlaygroundOwnershipTests(TestCase):
+    """Playground identity is always request.user.username (see
+    core.dashboard_views.playground) — this closes the pre-auth IDOR
+    where guessing/reusing another visitor's session_id (or user_id
+    string) surfaced their chat history."""
+
+    def setUp(self):
+        self.manager = _make_manager("owner")
+        self.other = _make_manager("other")
+        self.session_id = uuid.uuid4()
+        self.trace = Trace.objects.create(
+            session_id=self.session_id, user_id="owner", raw_prompt="secret question",
+        )
+
+    def test_another_account_cannot_resume_someone_elses_session_by_guessing_the_uuid(self):
+        self.client.force_login(self.other)
+        response = self.client.get(f"/dashboard/playground/?session={self.session_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.context["turns"]), 0)
+        self.assertNotIn("secret question", response.content.decode())
+
+    def test_owner_sees_their_own_chat_in_sidebar_history(self):
+        self.client.force_login(self.manager)
+        response = self.client.get("/dashboard/playground/")
+        titles = [c["title"] for c in response.context["chat_history"]]
+        self.assertIn("secret question", titles)
+
+    def test_other_account_does_not_see_owners_chat_in_sidebar_history(self):
+        self.client.force_login(self.other)
+        response = self.client.get("/dashboard/playground/")
+        self.assertEqual(response.context["chat_history"], [])
+
+    def test_another_account_cannot_post_into_someone_elses_session(self):
+        """Regression test: a client-supplied session_id used to be
+        trusted outright on POST, letting one account's turns write into
+        (and, via the SessionState it shares with core.pipeline, mutate)
+        another account's session-risk state — see core.dashboard_views.
+        playground's ownership check."""
+        self.client.force_login(self.other)
+        response = self.client.post("/dashboard/playground/", {
+            "session_id": str(self.session_id),
+            "raw_prompt": "trying to attach to someone else's session",
+        })
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(Trace.objects.filter(session_id=self.session_id).count(), 1)  # unchanged
+
+    def test_chat_history_title_is_never_taken_from_a_different_owners_trace(self):
+        """Defense in depth for _chat_history: even if a session_id ends
+        up with Trace rows from two different accounts (which the
+        ownership check above now prevents via the Playground view
+        itself, but this helper must not trust that on its own), the
+        sidebar title must only ever be built from the current account's
+        own Trace rows."""
+        shared_session = uuid.uuid4()
+        Trace.objects.create(
+            session_id=shared_session, user_id="owner",
+            raw_prompt="OWNER SECRET PROMPT",
+        )
+        Trace.objects.create(
+            session_id=shared_session, user_id="other",
+            raw_prompt="other's own prompt",
+        )
+        self.client.force_login(self.other)
+        response = self.client.get("/dashboard/playground/")
+        titles = [c["title"] for c in response.context["chat_history"]]
+        self.assertIn("other's own prompt", titles)
+        self.assertNotIn("OWNER SECRET PROMPT", titles)
+
+
+class PlaygroundDuplicateSubmissionTests(TestCase):
+    """Regression test: an employee unsure whether their message sent
+    (no visible feedback while a prompt-time HUMAN_REVIEW case sits OPEN,
+    possibly for a long time) used to be able to retype/resend the exact
+    same text, silently creating a second (or third) pending case for the
+    same request. See core.dashboard_views.playground's
+    is_duplicate_pending guard."""
+
+    def setUp(self):
+        manager = _make_manager("mgr-dup")
+        self.employee = _make_employee("emp-dup", manager)
+        self.client.force_login(self.employee)
+        self.session_id = uuid.uuid4()
+        self.prompt = "What medication should I take for my chest pain?"
+
+    def _post(self, raw_prompt=None):
+        payload = json.dumps({"violated_policies": ["medical_and_health"], "reason": "test"})
+        with patch("core.auditing_engine.call_prompt_auditor_model", return_value=payload):
+            return self.client.post("/dashboard/playground/", {
+                "session_id": str(self.session_id),
+                "raw_prompt": raw_prompt if raw_prompt is not None else self.prompt,
+            })
+
+    def test_resending_the_identical_prompt_while_the_first_is_still_pending_is_refused(self):
+        self._post()
+        self.assertEqual(Trace.objects.filter(session_id=self.session_id).count(), 1)
+
+        # Silently refused, per product decision — no visible message, just
+        # no second trace created.
+        response = self._post()
+        self.assertEqual(Trace.objects.filter(session_id=self.session_id).count(), 1)  # no second trace
+        self.assertIsNone(response.context["error"])
+
+    def test_a_different_prompt_in_the_same_session_is_not_blocked(self):
+        self._post()
+        self._post(raw_prompt="A completely different question.")
+        self.assertEqual(Trace.objects.filter(session_id=self.session_id).count(), 2)
+
+    def test_resending_after_the_first_is_resolved_is_allowed(self):
+        self._post()
+        trace = Trace.objects.get(session_id=self.session_id)
+        trace.status = Trace.STATUS_CLOSED
+        trace.save(update_fields=["status"])
+
+        self._post()
+        self.assertEqual(Trace.objects.filter(session_id=self.session_id).count(), 2)
+
+
+class PlaygroundGenerationFailureTests(TestCase):
+    """Regression test: a live model failure (rate limit/timeout) during
+    a direct, synchronous Playground submit used to leave the Trace OPEN
+    with no AuditRecord at all, and dump the raw exception string as the
+    error — surfacing once, on that render only, then rendering as a
+    permanent blank, pill-less turn on every later reload. See
+    core.dashboard_views.playground's POST handler."""
+
+    def setUp(self):
+        self.employee = _make_employee("emp-fail", _make_manager("mgr-fail"))
+        self.client.force_login(self.employee)
+
+    def _post(self):
+        with patch("core.pipeline.process_request", side_effect=Exception("simulated API failure")):
+            return self.client.post("/dashboard/playground/", {
+                "session_id": str(uuid.uuid4()),
+                "raw_prompt": "Hello there.",
+            })
+
+    def test_failure_shows_a_clean_message_not_the_raw_exception(self):
+        response = self._post()
+        self.assertEqual(response.context["error"], de.SAFE_GENERATION_UNAVAILABLE_MESSAGE)
+        self.assertNotIn("simulated API failure", response.context["error"])
+
+    def test_failed_trace_is_closed_with_a_minimal_audit_record(self):
+        self._post()
+        trace = Trace.objects.get(user_id="emp-fail")
+        self.assertEqual(trace.status, Trace.STATUS_CLOSED)
+        record = AuditRecord.objects.get(trace=trace)
+        self.assertIsNone(record.final_action)
+        self.assertEqual(record.user_response["content"], de.SAFE_GENERATION_UNAVAILABLE_MESSAGE)
+
+    def test_failed_turn_renders_with_a_failed_pill_on_reload(self):
+        self._post()
+        trace = Trace.objects.get(user_id="emp-fail")
+        response = self.client.get("/dashboard/playground/", {"session": str(trace.session_id)})
+        [turn] = response.context["turns"]
+        self.assertTrue(turn.generation_failed)
+        self.assertEqual(turn.chat_response, de.SAFE_GENERATION_UNAVAILABLE_MESSAGE)
+        self.assertEqual(turn.status_pill_label, "Failed")
+        self.assertEqual(turn.status_pill_css, "failed")
+
+
+class PlaygroundPendingStatusEndpointTests(TestCase):
+    """core.dashboard_views.playground_pending_status — polled by
+    playground.html so an approval/rejection reaches the employee's chat
+    without a manual page refresh."""
+
+    def setUp(self):
+        self.owner = _make_manager("poll-owner")
+        self.other = _make_manager("poll-other")
+        self.trace = Trace.objects.create(user_id="poll-owner", raw_prompt="x")
+        self.record = AuditRecord.objects.create(
+            trace=self.trace, final_action="HUMAN_REVIEW", human_review_status="PENDING",
+            human_review={
+                "status": "PENDING", "violated_policies": [], "policy_trigger_reason": "x",
+                "reviewer_id": None, "decision": None, "decided_at": None, "final_user_response": None,
+            },
+        )
+
+    def test_still_pending_case_is_echoed_back(self):
+        self.client.force_login(self.owner)
+        response = self.client.get(f"/dashboard/playground/pending-status/?ids={self.trace.request_id}")
+        self.assertEqual(response.json()["still_pending"], [str(self.trace.request_id)])
+
+    def test_decided_case_drops_out(self):
+        self.record.human_review_status = "DECIDED"
+        self.record.save(update_fields=["human_review_status"])
+        self.client.force_login(self.owner)
+        response = self.client.get(f"/dashboard/playground/pending-status/?ids={self.trace.request_id}")
+        self.assertEqual(response.json()["still_pending"], [])
+
+    def test_another_accounts_pending_case_is_never_echoed(self):
+        self.client.force_login(self.other)
+        response = self.client.get(f"/dashboard/playground/pending-status/?ids={self.trace.request_id}")
+        self.assertEqual(response.json()["still_pending"], [])
+
+    def test_malformed_id_is_ignored_not_a_500(self):
+        self.client.force_login(self.owner)
+        response = self.client.get("/dashboard/playground/pending-status/?ids=not-a-uuid,,")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["still_pending"], [])
+
+    def test_approved_but_not_yet_generated_still_counts_as_pending(self):
+        """Regression test: core.dashboard_views.human_review_queue's POST
+        handler flips human_review_status to DECIDED immediately on
+        APPROVE, before core.pipeline.resume_after_prompt_review's live
+        generation call finishes filling in final_user_response — a poll
+        landing in that window must not tell the caller to reload, or the
+        employee's page would show the "did not complete" fallback for a
+        request that is actually still in flight, not failed."""
+        self.record.human_review_status = "DECIDED"
+        self.record.human_review.update({"decision": "APPROVE", "final_user_response": None})
+        self.record.save(update_fields=["human_review_status", "human_review"])
+        self.client.force_login(self.owner)
+        response = self.client.get(f"/dashboard/playground/pending-status/?ids={self.trace.request_id}")
+        self.assertEqual(response.json()["still_pending"], [str(self.trace.request_id)])
+
+    def test_approved_and_generated_no_longer_pending(self):
+        self.record.human_review_status = "DECIDED"
+        self.record.human_review.update({"decision": "APPROVE", "final_user_response": "the reply"})
+        self.record.save(update_fields=["human_review_status", "human_review"])
+        self.client.force_login(self.owner)
+        response = self.client.get(f"/dashboard/playground/pending-status/?ids={self.trace.request_id}")
+        self.assertEqual(response.json()["still_pending"], [])
+
+    def test_rejected_is_immediately_resolved_no_generation_window(self):
+        # apply_prompt_review_decision fills in final_user_response
+        # synchronously for REJECT, so there is no in-flight window like
+        # APPROVE's to guard against here.
+        self.record.human_review_status = "DECIDED"
+        self.record.human_review.update({"decision": "REJECT", "final_user_response": de.SAFE_BLOCK_MESSAGE})
+        self.record.save(update_fields=["human_review_status", "human_review"])
+        self.client.force_login(self.owner)
+        response = self.client.get(f"/dashboard/playground/pending-status/?ids={self.trace.request_id}")
+        self.assertEqual(response.json()["still_pending"], [])
+
+    def test_generation_failed_case_no_longer_counts_as_pending(self):
+        # Regression test: without this, a resume_after_prompt_review
+        # failure (rate limit/timeout) leaves the record in exactly the
+        # same shape as the legitimate in-flight window above (DECIDED,
+        # final_user_response=None) — the poll must stop waiting for this
+        # one, not treat it identically to "still generating".
+        self.record.human_review_status = "DECIDED"
+        self.record.human_review.update({
+            "decision": "APPROVE", "final_user_response": None, "generation_failed": True,
+        })
+        self.record.save(update_fields=["human_review_status", "human_review"])
+        self.client.force_login(self.owner)
+        response = self.client.get(f"/dashboard/playground/pending-status/?ids={self.trace.request_id}")
+        self.assertEqual(response.json()["still_pending"], [])
+
+
+class PlaygroundHumanReviewSidebarTests(TestCase):
+    """The Playground's Requests sidebar tab (core.dashboard_views.
+    _my_human_review_requests) and the chat thread's post-decision
+    override (core.dashboard_views.playground's turns loop) — a
+    HUMAN_REVIEW turn's "your request is being reviewed" placeholder and
+    HUMAN_REVIEW status pill must flip to the reviewer's actual decision
+    once one exists, and never before."""
+
+    def setUp(self):
+        self.owner = _make_manager("owner")
+        self.other = _make_manager("other")
+        self.session_id = uuid.uuid4()
+        self.trace = Trace.objects.create(
+            session_id=self.session_id, user_id="owner",
+            raw_prompt="please review this", final_decision="HUMAN_REVIEW",
+        )
+
+    def _make_pending_record(self):
+        # Prompt-time shape (core.decision_executor.execute_prompt_human_
+        # review): no raw_response/redacted_response — nothing has been
+        # generated yet at the pending stage.
+        return AuditRecord.objects.create(
+            trace=self.trace, final_action="HUMAN_REVIEW", human_review_status="PENDING",
+            human_review={
+                "status": "PENDING", "violated_policies": ["medical_and_health"],
+                "policy_trigger_reason": "low confidence", "reviewer_id": None, "decision": None,
+                "decided_at": None, "final_user_response": None,
+            },
+            user_response={
+                "content": "Your request requires approval before it can be processed. You'll see the response here once it's reviewed.",
+                "disclosure_notice": None,
+            },
+        )
+
+    def test_pending_case_shows_pending_in_requests_sidebar_and_placeholder_in_thread(self):
+        self._make_pending_record()
+        self.client.force_login(self.owner)
+        response = self.client.get("/dashboard/playground/", {"session": str(self.session_id)})
+
+        [my_request] = response.context["my_requests"]
+        self.assertEqual(my_request["status"], "PENDING")
+
+        [turn] = response.context["turns"]
+        self.assertIsNone(turn.review_status_label)
+        self.assertIn("requires approval", turn.chat_response)
+
+    def test_approved_case_replaces_placeholder_and_pill_in_thread_and_sidebar(self):
+        record = self._make_pending_record()
+        record.human_review_status = "DECIDED"
+        record.human_review.update({
+            "status": "DECIDED", "decision": "APPROVE", "reviewer_id": "owner-manager", "final_user_response": "the original reply",
+        })
+        record.save(update_fields=["human_review_status", "human_review"])
+
+        self.client.force_login(self.owner)
+        response = self.client.get("/dashboard/playground/", {"session": str(self.session_id)})
+
+        [my_request] = response.context["my_requests"]
+        self.assertEqual(my_request["status"], "APPROVED")
+
+        [turn] = response.context["turns"]
+        self.assertEqual(turn.review_status_label, "APPROVED")
+        self.assertEqual(turn.chat_response, "the original reply")
+
+    def test_rejected_case_shows_rejected_and_the_safe_message(self):
+        record = self._make_pending_record()
+        record.human_review_status = "DECIDED"
+        record.human_review.update({
+            "status": "DECIDED", "decision": "REJECT", "reviewer_id": "owner-manager",
+            "final_user_response": de.SAFE_BLOCK_MESSAGE,
+        })
+        record.save(update_fields=["human_review_status", "human_review"])
+
+        self.client.force_login(self.owner)
+        response = self.client.get("/dashboard/playground/", {"session": str(self.session_id)})
+
+        [my_request] = response.context["my_requests"]
+        self.assertEqual(my_request["status"], "REJECTED")
+
+        [turn] = response.context["turns"]
+        self.assertEqual(turn.review_status_label, "REJECTED")
+        self.assertEqual(turn.chat_response, de.SAFE_BLOCK_MESSAGE)
+
+    def test_other_account_never_sees_owners_requests_in_their_own_sidebar(self):
+        self._make_pending_record()
+        self.client.force_login(self.other)
+        response = self.client.get("/dashboard/playground/")
+        self.assertEqual(response.context["my_requests"], [])
+
+    def test_generation_failed_case_shows_failed_pill_and_message_in_thread_and_sidebar(self):
+        # Regression test: a manager's APPROVE triggers core.pipeline.
+        # resume_after_prompt_review's live generation call, which can
+        # fail (rate limit/timeout) after human_review_status is already
+        # "DECIDED" — core.dashboard_views.human_review_queue's POST
+        # handler marks human_review["generation_failed"] in that case
+        # (see PlaygroundPendingStatusEndpointTests /
+        # HumanReviewDecisionViewTests for the other two surfaces of this
+        # same fix). The employee must see a clear, fixed message here,
+        # never a blank bubble or the stale "requires approval" placeholder.
+        record = self._make_pending_record()
+        record.human_review_status = "DECIDED"
+        record.human_review.update({
+            "status": "DECIDED", "decision": "APPROVE", "reviewer_id": "owner-manager",
+            "final_user_response": None, "generation_failed": True,
+        })
+        record.save(update_fields=["human_review_status", "human_review"])
+
+        self.client.force_login(self.owner)
+        response = self.client.get("/dashboard/playground/", {"session": str(self.session_id)})
+
+        [my_request] = response.context["my_requests"]
+        self.assertEqual(my_request["status"], "FAILED")
+
+        [turn] = response.context["turns"]
+        self.assertTrue(turn.generation_failed)
+        self.assertIsNone(turn.review_status_label)
+        self.assertEqual(turn.chat_response, de.SAFE_GENERATION_UNAVAILABLE_MESSAGE)
+        self.assertEqual(turn.status_pill_label, "Failed")
+        self.assertEqual(turn.status_pill_css, "failed")
 
 
 class RegulationLibraryTests(TestCase):
@@ -2189,18 +2835,14 @@ class RegulationLibraryTests(TestCase):
 
 
 def _trigger_values_for(config):
-    """Computes, from a use-case's own loaded policy config, score values
-    that breach exactly one specific bucket without also breaching a
-    higher-priority one — used by the end-to-end scenario tests below so
-    they adapt to whatever the actual YAML thresholds are, rather than
-    relying on hand-copied magic numbers per use case."""
-    t = config["thresholds"]
-    return {
-        "human_review_safety_risk": min(t["human_review"]["safety_risk"], t["block"]["safety_risk"] - 1),
-        "verify_hallucination_risk": min(
-            t["verify"]["hallucination_risk"], t["human_review"]["hallucination_risk"] - 1
-        ),
-    }
+    """Computes, from a use-case's own loaded policy config, a
+    hallucination_risk score that breaches the verify bucket (and only
+    that bucket — nothing above it in RULE_ORDER references
+    hallucination_risk for any use case) — used by the end-to-end
+    scenario tests below so they adapt to whatever the actual YAML
+    thresholds are, rather than relying on hand-copied magic numbers per
+    use case."""
+    return {"verify_hallucination_risk": config["thresholds"]["verify"]["hallucination_risk"]}
 
 
 def _all_clear_audit_payload(**overrides):
@@ -2225,24 +2867,17 @@ def _all_clear_audit_payload(**overrides):
 
 class EndToEndPipelineScenarioTests(TestCase):
     """Step 10 'Prove it works': sample scenarios covering all 5 decision
-    paths x 3 use-case profiles, run through the real, now-wired
-    /api/requests/ endpoint. Test: assert both the expected final
-    decision and a complete, correctly-populated audit record."""
+    paths, run through the real, now-wired /api/requests/ endpoint. Test:
+    assert both the expected final decision and a complete,
+    correctly-populated audit record."""
 
-    USE_CASES = ["CustomerSupport", "InternalKnowledge", "DecisionSupport"]
-
-    def setUp(self):
-        for use_case_id in self.USE_CASES:
-            UseCaseProfile.objects.get_or_create(use_case_id=use_case_id, defaults={"name": use_case_id})
-
-    def _post(self, use_case_id, raw_prompt):
+    def _post(self, raw_prompt):
         return self.client.post(
             "/api/requests/",
             data=json.dumps({
                 "raw_prompt": raw_prompt,
                 "user_id": "scenario-user",
                 "session_id": str(uuid.uuid4()),
-                "use_case_id": use_case_id,
             }),
             content_type="application/json",
         )
@@ -2256,126 +2891,127 @@ class EndToEndPipelineScenarioTests(TestCase):
         self.assertTrue(record.policy_profile_version)
         return record
 
-    def test_allow_scenario_for_every_use_case(self):
-        for use_case_id in self.USE_CASES:
-            with self.subTest(use_case=use_case_id):
-                response = self._post(use_case_id, "What are your business hours?")
-                self.assertEqual(response.status_code, 200)
-                body = response.json()
-                self.assertEqual(body["status"], "ALLOW")
-                record = self._assert_complete_audit_record(body["request_id"], "ALLOW")
-                self.assertTrue(record.response_metrics)
-                self.assertTrue(record.audit_quality)
-                self.assertTrue(record.audit_responsibility)
+    def test_allow_scenario(self):
+        response = self._post("What are your business hours?")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "ALLOW")
+        record = self._assert_complete_audit_record(body["request_id"], "ALLOW")
+        self.assertTrue(record.response_metrics)
+        self.assertTrue(record.audit_quality)
+        self.assertTrue(record.audit_responsibility)
 
-    def test_block_via_router_pre_check_for_every_use_case(self):
+    def test_block_via_router_pre_check(self):
         # Section 3 Step 2, 2C's own Critical-band example content, which
-        # pre_request_analysis.risk_score scores at 9 regardless of use
-        # case, triggering Section 3 Step 3's router pre-check BLOCK
-        # before any model call.
+        # pre_request_analysis.risk_score scores at 9, triggering Section
+        # 3 Step 3's router pre-check BLOCK before any model call.
         prompt = "This is a regulated decision affecting a safety-critical hospital system."
-        for use_case_id in self.USE_CASES:
-            with self.subTest(use_case=use_case_id):
-                response = self._post(use_case_id, prompt)
-                self.assertEqual(response.status_code, 200)
-                body = response.json()
-                self.assertEqual(body["status"], "BLOCK")
-                self.assertEqual(body["message"], de.SAFE_BLOCK_MESSAGE)
-                record = self._assert_complete_audit_record(body["request_id"], "BLOCK")
-                self.assertEqual(record.policy_rules_triggered, ["ROUTER_PRE_CHECK:risk_score"])
-                self.assertEqual(record.response_metrics, {})  # no model call was made
+        response = self._post(prompt)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "BLOCK")
+        self.assertEqual(body["message"], de.SAFE_BLOCK_MESSAGE)
+        record = self._assert_complete_audit_record(body["request_id"], "BLOCK")
+        self.assertEqual(record.policy_rules_triggered, ["ROUTER_PRE_CHECK:risk_score"])
+        self.assertEqual(record.response_metrics, {})  # no model call was made
 
-    def test_modify_via_pii_detection_for_every_use_case(self):
-        # MODIFY's redaction target is the model's *response* text
-        # (Section 3 Step 9 MODIFY: "The response is passed to a
-        # redaction/modification module"), not the original user prompt —
-        # the simulated stub response never echoes the prompt's PII back,
-        # so this only asserts the correct path fired and the modification
-        # log is present, not a redacted placeholder in this stub's reply.
+    def test_modify_via_pii_detection(self):
+        # MODIFY no longer redacts the model's response — per explicit
+        # product decision, an LLM-generated reply is audited only, never
+        # altered (see decision_executor.execute_modify) — so this just
+        # asserts the correct path fired and the audit log records which
+        # PII categories (if any) were detected in the reply.
         prompt = "Please update my contact email to john.smith@example.com."
-        for use_case_id in self.USE_CASES:
-            with self.subTest(use_case=use_case_id):
-                response = self._post(use_case_id, prompt)
-                self.assertEqual(response.status_code, 200)
-                body = response.json()
-                self.assertEqual(body["status"], "MODIFY")
-                record = self._assert_complete_audit_record(body["request_id"], "MODIFY")
-                self.assertIn("original_content_encrypted", record.modification)
+        response = self._post(prompt)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "MODIFY")
+        record = self._assert_complete_audit_record(body["request_id"], "MODIFY")
+        self.assertIn("categories_detected", record.modification)
 
-    def test_human_review_via_audit_score_for_every_use_case(self):
-        for use_case_id in self.USE_CASES:
-            with self.subTest(use_case=use_case_id):
-                config = pe.load_policy_config(use_case_id)
-                trigger = _trigger_values_for(config)["human_review_safety_risk"]
-                payload = _all_clear_audit_payload(safety_risk_score=trigger, recommended_action="HUMAN_REVIEW")
-                with patch("core.auditing_engine.call_auditor_model", return_value=json.dumps(payload)):
-                    response = self._post(use_case_id, "Give me guidance on this matter.")
-                self.assertEqual(response.status_code, 202)
-                body = response.json()
-                self.assertEqual(body["status"], "HUMAN_REVIEW")
-                record = self._assert_complete_audit_record(body["request_id"], "HUMAN_REVIEW")
-                self.assertEqual(record.human_review_status, "PENDING")
-                self.assertIsNotNone(record.human_review)
+    def test_human_review_via_prompt_policy_audit(self):
+        # Human Review is now decided at the PROMPT stage, before any
+        # generation call — mocking the prompt auditor's own model call,
+        # not the response auditor's, is what actually exercises this
+        # path now (core.auditing_engine.run_prompt_policy_audit, wired
+        # in core.pipeline).
+        auditor_payload = json.dumps({
+            "violated_policies": ["medical_and_health"],
+            "reason": "The prompt requests personalized medical treatment advice.",
+        })
+        with patch("core.auditing_engine.call_prompt_auditor_model", return_value=auditor_payload):
+            response = self._post("What medication should I take for chest pain?")
+        self.assertEqual(response.status_code, 202)
+        body = response.json()
+        self.assertEqual(body["status"], "HUMAN_REVIEW")
+        record = self._assert_complete_audit_record(body["request_id"], "HUMAN_REVIEW")
+        self.assertEqual(record.human_review_status, "PENDING")
+        self.assertIsNotNone(record.human_review)
+        self.assertEqual(record.human_review["violated_policies"], ["medical_and_health"])
+        # No generation call was made — nothing to audit yet.
+        self.assertEqual(record.response_metrics, {})
 
-    def test_verify_then_retry_succeeds_to_allow_for_every_use_case(self):
-        for use_case_id in self.USE_CASES:
-            with self.subTest(use_case=use_case_id):
-                config = pe.load_policy_config(use_case_id)
-                trigger = _trigger_values_for(config)["verify_hallucination_risk"]
-                bad_payload = _all_clear_audit_payload(hallucination_risk_score=trigger, recommended_action="VERIFY")
-                good_payload = _all_clear_audit_payload(recommended_action="ALLOW")
-                with patch(
-                    "core.auditing_engine.call_auditor_model",
-                    side_effect=[json.dumps(bad_payload), json.dumps(good_payload)],
-                ):
-                    response = self._post(use_case_id, "Summarise this document for me.")
-                self.assertEqual(response.status_code, 200)
-                body = response.json()
-                self.assertEqual(body["status"], "ALLOW")
-                self._assert_complete_audit_record(body["request_id"], "ALLOW")
+    def test_verify_then_retry_succeeds_to_allow(self):
+        config = pe.load_policy_config()
+        trigger = _trigger_values_for(config)["verify_hallucination_risk"]
+        bad_payload = _all_clear_audit_payload(hallucination_risk_score=trigger, recommended_action="VERIFY")
+        good_payload = _all_clear_audit_payload(recommended_action="ALLOW")
+        with patch(
+            "core.auditing_engine.call_auditor_model",
+            side_effect=[json.dumps(bad_payload), json.dumps(good_payload)],
+        ):
+            response = self._post("Summarise this document for me.")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "ALLOW")
+        record = self._assert_complete_audit_record(body["request_id"], "ALLOW")
+        # The VERIFY/RETRY loop ran once before resolving to ALLOW — this
+        # must be visible to core.dashboard.retry_verify_rate even though
+        # final_action never persists as "VERIFY" itself.
+        self.assertEqual(record.response_metrics["verify_retry_count"], 1)
 
-    def test_verify_exhausted_escalates_to_human_review_for_every_use_case(self):
-        for use_case_id in self.USE_CASES:
-            with self.subTest(use_case=use_case_id):
-                config = pe.load_policy_config(use_case_id)
-                trigger = _trigger_values_for(config)["verify_hallucination_risk"]
-                bad_payload = _all_clear_audit_payload(hallucination_risk_score=trigger, recommended_action="VERIFY")
-                with patch("core.auditing_engine.call_auditor_model", return_value=json.dumps(bad_payload)):
-                    response = self._post(use_case_id, "Summarise this document for me.")
-                self.assertEqual(response.status_code, 202)
-                body = response.json()
-                self.assertEqual(body["status"], "HUMAN_REVIEW")
-                self._assert_complete_audit_record(body["request_id"], "HUMAN_REVIEW")
+    def test_verify_exhausted_delivers_allow_with_a_warning(self):
+        config = pe.load_policy_config()
+        trigger = _trigger_values_for(config)["verify_hallucination_risk"]
+        bad_payload = _all_clear_audit_payload(hallucination_risk_score=trigger, recommended_action="VERIFY")
+        with patch("core.auditing_engine.call_auditor_model", return_value=json.dumps(bad_payload)):
+            response = self._post("Summarise this document for me.")
+        # Per product decision, response-side auditing can never
+        # escalate to HUMAN_REVIEW any more (see core.policy_
+        # engine's RULE_ORDER comment) — exhausted retries deliver
+        # the last attempt instead, flagged with a Verify warning.
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "ALLOW")
+        record = self._assert_complete_audit_record(body["request_id"], "ALLOW")
+        self.assertTrue(any(w["dimension"] == "retry_exhausted" for w in record.verify_warnings))
+        # All max_retries attempts ran (each one also came back VERIFY).
+        self.assertEqual(record.response_metrics["verify_retry_count"], config["max_retries"])
 
 
 class GeographyRegulationWiringTests(TestCase):
-    """Step 10: geography/regulation rule injection wired by the use
-    case's configured geography, verified end to end through the real
-    endpoint."""
+    """Step 10: geography/regulation metadata wired end to end through the
+    real endpoint. Since "use case" was removed, these are now fixed,
+    system-wide values (core.pipeline's _FIXED_* constants) rather than
+    configurable per request — this verifies they flow through correctly,
+    not that they vary."""
 
-    def setUp(self):
-        self.use_case = UseCaseProfile.objects.create(
-            use_case_id="DecisionSupport", name="Decision Support",
-            geography=["IN", "EU"], regulations=["GDPR", "DPDP"],
-            eu_ai_act_high_risk=True, audit_retention_days=90,
-        )
-
-    def test_audit_record_carries_geography_and_regulation_versions(self):
+    def test_audit_record_carries_fixed_geography_and_regulation_metadata(self):
         response = self.client.post(
             "/api/requests/",
             data=json.dumps({
                 "raw_prompt": "What are your business hours?",
-                "user_id": "u1", "session_id": str(uuid.uuid4()), "use_case_id": "DecisionSupport",
+                "user_id": "u1", "session_id": str(uuid.uuid4()),
             }),
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 200)
         record = AuditRecord.objects.get(trace_id=response.json()["request_id"])
-        self.assertEqual(record.geography, ["IN", "EU"])
-        self.assertEqual(record.regulation_versions, {"GDPR": "2024-Q4", "DPDP": "2024-Q2"})
-        self.assertTrue(record.compliance_metadata["eu_ai_act_high_risk"])
-        self.assertEqual(record.compliance_metadata["effective_audit_retention_days"], 2555)
-        self.assertIsNotNone(record.compliance_metadata["conformity_log"])
+        self.assertEqual(record.geography, [])
+        self.assertEqual(record.regulation_versions, {})
+        self.assertFalse(record.compliance_metadata["eu_ai_act_high_risk"])
+        self.assertEqual(record.compliance_metadata["effective_audit_retention_days"], 90)
+        self.assertIsNone(record.compliance_metadata["conformity_log"])
 
 
 class SessionRiskEscalationLivePipelineTests(TestCase):
@@ -2384,17 +3020,13 @@ class SessionRiskEscalationLivePipelineTests(TestCase):
     test from Step 8."""
 
     def setUp(self):
-        self.use_case = UseCaseProfile.objects.create(
-            use_case_id="DecisionSupport", name="Decision Support",
-        )
-        self.config = pe.load_policy_config("DecisionSupport")
+        self.config = pe.load_policy_config()
 
     def _post(self, session_id, raw_prompt):
         return self.client.post(
             "/api/requests/",
             data=json.dumps({
-                "raw_prompt": raw_prompt, "user_id": "u1",
-                "session_id": session_id, "use_case_id": "DecisionSupport",
+                "raw_prompt": raw_prompt, "user_id": "u1", "session_id": session_id,
             }),
             content_type="application/json",
         )

@@ -1,5 +1,6 @@
 import uuid
 
+from django.conf import settings
 from django.db import models
 
 
@@ -13,109 +14,9 @@ DECISION_CHOICES = [
     ("BLOCK", "Block"),
 ]
 
-# Section 14.2 policy config schema: model_tier_preference: [low, mid, high, expert]
-MODEL_TIER_CHOICES = [
-    ("low", "Low"),
-    ("mid", "Mid"),
-    ("high", "High"),
-    ("expert", "Expert"),
-]
-
-
-class UseCaseProfile(models.Model):
-    """Section 2.2 Decision 3: every request carries a use_case_id that maps to a
-    pre-configured profile governing model tier preference, geography/regulation
-    set, and session-risk behaviour. Section 2.4/6.1 default session_risk_window
-    of 5 turns; Section 10.3 default audit retention of 90 days."""
-
-    use_case_id = models.CharField(max_length=100, unique=True)
-    name = models.CharField(max_length=200)
-    description = models.TextField(blank=True)
-
-    # Section 5.1 example: "geography: IN,EU # applies DPDP, GDPR rules"
-    geography = models.JSONField(default=list, blank=True)
-    # Section 14.2: "regulations: list[regulation_id]"
-    regulations = models.JSONField(default=list, blank=True)
-
-    # Section 14.2: "model_tier_preference: [low, mid, high, expert]"
-    model_tier_preference = models.CharField(
-        max_length=10, choices=MODEL_TIER_CHOICES, default="mid"
-    )
-
-    # Section 6.1: "Rolling average of risk scores across the last N turns
-    # (configurable, default N = 5)."
-    session_risk_window = models.PositiveIntegerField(default=5)
-
-    # Section 10.3: "Audit records are retained ... minimum 90 days, up to 7 years
-    # for regulated industries."
-    audit_retention_days = models.PositiveIntegerField(default=90)
-
-    # Section 8.2: "The system classifies each use-case profile against
-    # the EU AI Act Annex III high-risk categories." The document
-    # references these categories without enumerating them or giving a
-    # concrete classification rule, so this is an explicit configuration
-    # decision an operator makes for each use case, not something this
-    # system infers from the prompt or from geography.
-    eu_ai_act_high_risk = models.BooleanField(default=False)
-
-    is_active = models.BooleanField(default=True)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["use_case_id"]
-
-    def __str__(self):
-        return self.use_case_id
-
-
-class PolicyConfig(models.Model):
-    """Section 5.1: per-use-case YAML policy file holding thresholds for
-    block/human_review/modify/verify, max_retries and latency_budget_ms.
-    Section 5 callout: "Changing a threshold requires no code deployment — only
-    a config reload", and Section 7.2: "All threshold changes are versioned and
-    auditable" — hence this is a distinct, versioned model tied to a
-    UseCaseProfile rather than being folded into it."""
-
-    use_case_profile = models.ForeignKey(
-        UseCaseProfile, on_delete=models.CASCADE, related_name="policy_configs"
-    )
-    # Section 14.2: "version: semver string"
-    version = models.CharField(max_length=50)
-
-    # Section 5.1 example structure:
-    # thresholds: { block: {...}, human_review: {...}, modify: {...}, verify: {...} }
-    thresholds = models.JSONField(default=dict, blank=True)
-
-    # Section 14.2: "max_retries: integer (0–3)"; Section 9 default is 2.
-    max_retries = models.PositiveSmallIntegerField(default=2)
-    # Section 3 Step 4: e.g. 5s for CustomerSupport, 30s for DecisionSupport.
-    latency_budget_ms = models.PositiveIntegerField(default=5000)
-    # Section 14.2: "require_human_for_block: bool" (5.1: require_human_review_for_final_block)
-    require_human_for_block = models.BooleanField(default=False)
-    # Section 14.2: "session_risk_threshold: float"
-    session_risk_threshold = models.FloatField(default=5.0)
-
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ["-created_at"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["use_case_profile", "version"],
-                name="unique_policy_version_per_use_case",
-            )
-        ]
-
-    def __str__(self):
-        return f"{self.use_case_profile.use_case_id} v{self.version}"
-
-
 class Trace(models.Model):
     """Section 3 Step 1 — Request Ingestion & Trace Initialisation.
-    Inputs: raw_prompt, user_id, session_id, use_case_id, client_metadata.
+    Inputs: raw_prompt, user_id, session_id, client_metadata.
     Outputs: request_id (UUID), trace_object (open), timestamp.
     "Failure: All failures in this step result in a 503 with a safe error
     message; the trace is never lost." """
@@ -130,9 +31,6 @@ class Trace(models.Model):
     request_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session_id = models.UUIDField(default=uuid.uuid4)
     user_id = models.CharField(max_length=200)
-    use_case = models.ForeignKey(
-        UseCaseProfile, on_delete=models.PROTECT, related_name="traces"
-    )
     raw_prompt = models.TextField()
     client_metadata = models.JSONField(default=dict, blank=True)
 
@@ -168,9 +66,6 @@ class SessionState(models.Model):
     session_risk_threshold, previous_decisions."""
 
     session_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    use_case = models.ForeignKey(
-        UseCaseProfile, on_delete=models.PROTECT, related_name="session_states"
-    )
 
     turn_number = models.PositiveIntegerField(default=0)
     session_risk_accumulator = models.FloatField(default=0.0)
@@ -235,6 +130,15 @@ class AuditRecord(models.Model):
     # Section 3 Step 2 (2A/2B/2C/2D) pre-request analysis block.
     pre_request = models.JSONField(default=dict, blank=True)
 
+    # Prompt-time Human Review policy audit (core.auditing_engine.
+    # run_prompt_policy_audit + core.policy_engine.evaluate_prompt_policy),
+    # run BEFORE generation against core/config/company_policy.json:
+    # {decision, reason, violated_policies, policy_version}. Recorded for
+    # EVERY request, including ALLOW, for the same completeness reason
+    # this model's own docstring already states. Null only for a request
+    # the router's own pre-check blocked before this audit ever ran.
+    prompt_audit = models.JSONField(blank=True, null=True)
+
     # Section 3 Step 3 model routing decision block.
     model_routing = models.JSONField(default=dict, blank=True)
 
@@ -283,6 +187,16 @@ class AuditRecord(models.Model):
     # Section 14.1: final content returned to the user (de-pseudonymised) plus
     # any disclosure notice.
     user_response = models.JSONField(blank=True, null=True)
+
+    # Non-gating response-side annotations (core.policy_engine.
+    # evaluate_verify_warnings): a hallucination/bias/toxicity/quality
+    # concern that used to be able to route to HUMAN_REVIEW or (via
+    # VERIFY/RETRY exhaustion) escalate there now instead surfaces here —
+    # [{"dimension", "score", "message"}, ...] — shown alongside the
+    # (still delivered) response, never affecting final_action. Empty
+    # list, not null, when nothing was flagged or this request never
+    # reached a response to audit (e.g. BLOCK).
+    verify_warnings = models.JSONField(default=list, blank=True)
 
     def __str__(self):
         return f"AuditRecord({self.trace_id})"
@@ -379,3 +293,39 @@ class ThresholdChangeProposal(models.Model):
 
     def __str__(self):
         return f"ThresholdChangeProposal({self.use_case_id}, {self.dimension}, {self.status})"
+
+
+class UserProfile(models.Model):
+    """Role-based authorisation: every registered account is either an
+    "employee" (Playground access only) or a "manager" (every dashboard
+    page, plus Playground). An employee's `manager` FK is resolved at
+    registration time from the manager's email and is what team-scoped
+    dashboard/trends/human-review/FPR aggregation (core/authz.py,
+    core/dashboard.py) is keyed on — Trace.user_id is populated from
+    request.user.username (see core/dashboard_views.py), so a manager's
+    "team" resolves to the usernames of themselves plus every UserProfile
+    whose manager points back at them."""
+
+    ROLE_EMPLOYEE = "employee"
+    ROLE_MANAGER = "manager"
+    ROLE_CHOICES = [(ROLE_EMPLOYEE, "Employee"), (ROLE_MANAGER, "Manager")]
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile"
+    )
+    role = models.CharField(max_length=10, choices=ROLE_CHOICES)
+
+    # Only ever set for role=employee, resolved from the manager-email the
+    # employee supplies at registration (core/auth_views.py); a manager's
+    # own profile leaves this null. on_delete=SET_NULL rather than CASCADE
+    # so a manager account being deleted doesn't cascade-delete every one
+    # of their employees' accounts.
+    manager = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="team_members", limit_choices_to={"role": ROLE_MANAGER},
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.username} ({self.role})"

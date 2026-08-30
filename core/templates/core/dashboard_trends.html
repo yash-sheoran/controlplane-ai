@@ -1,37 +1,95 @@
 {% extends "core/base.html" %}
 {% block title %}Trends — ControlPlane.ai{% endblock %}
 {% block content %}
+<style>
+    .info-tooltip {
+        position: relative; display: inline-flex; align-items: center; justify-content: center;
+        width: 15px; height: 15px; border-radius: 50%; background: var(--bg-hover); color: var(--text-secondary);
+        border: none; font-size: 10.5px; font-weight: 700; font-style: italic; font-family: Georgia, serif;
+        line-height: 1; padding: 0; margin-left: 6px; vertical-align: middle; cursor: default;
+    }
+    .info-tooltip:hover, .info-tooltip:focus { background: var(--border-strong); color: var(--text-primary); outline: none; }
+    .info-tooltip-text {
+        position: absolute; bottom: 130%; left: 50%; transform: translate(-50%, 4px);
+        width: 240px; background: var(--text-primary); color: #fff; font-style: normal; font-weight: 400;
+        font-family: var(--font-sans); font-size: 12px; line-height: 1.5; text-align: left;
+        padding: 8px 10px; border-radius: 8px; opacity: 0; visibility: hidden;
+        transition: opacity .12s ease, transform .12s ease; pointer-events: none; z-index: 5;
+    }
+    .info-tooltip:hover .info-tooltip-text, .info-tooltip:focus .info-tooltip-text {
+        opacity: 1; visibility: visible; transform: translate(-50%, 0);
+    }
+</style>
 <h1>Safety &amp; Quality Trends</h1>
-<p class="label">Section 10.2 — last {{ days }} days</p>
 
 <div class="grid">
     <div class="card">
-        <div class="label">Hallucination Rate (avg score)</div>
+        <div class="label">Hallucination Rate (avg score)
+            <button type="button" class="info-tooltip" aria-label="What does Hallucination Rate mean?">i
+                <span class="info-tooltip-text" role="tooltip">
+                    How often AI answers seem to make things up, on a scale from 1 (rarely) to 10 (often)
+                    — a score, not a percentage. Only counts answers that were actually checked.
+                </span>
+            </button>
+        </div>
         <div class="stat" id="hallucination-rate">{{ hallucination_rate }}</div>
     </div>
     <div class="card">
-        <div class="label">Safety Violation Rate</div>
-        <div class="stat" id="safety-violation-rate">{{ safety_violation_rate }}%</div>
-    </div>
-    <div class="card">
-        <div class="label">Data Leakage Attempts</div>
+        <div class="label">Data Leakage Attempts
+            <button type="button" class="info-tooltip" aria-label="What does Data Leakage Attempts mean?">i
+                <span class="info-tooltip-text" role="tooltip">
+                    How many times private information (like an email or phone number) showed up —
+                    either in what the AI said back, or in what someone typed in. A total count, not
+                    a percentage.
+                </span>
+            </button>
+        </div>
         <div class="stat" id="data-leakage-attempts">{{ data_leakage_attempts }}</div>
     </div>
     <div class="card">
-        <div class="label">Bias Detection Rate</div>
+        <div class="label">Bias Detection Rate
+            <button type="button" class="info-tooltip" aria-label="What does Bias Detection Rate mean?">i
+                <span class="info-tooltip-text" role="tooltip">
+                    The share of checked answers that showed signs of unfair or one-sided treatment
+                    toward a person or group.
+                </span>
+            </button>
+        </div>
         <div class="stat" id="bias-detection-rate">{{ bias_detection_rate }}%</div>
     </div>
     <div class="card">
-        <div class="label">Blocked Request Rate</div>
+        <div class="label">Blocked Request Rate
+            <button type="button" class="info-tooltip" aria-label="What does Blocked Request Rate mean?">i
+                <span class="info-tooltip-text" role="tooltip">
+                    The share of requests that were stopped completely and never shown to the user,
+                    because they were judged too risky. The number below shows the raw count.
+                </span>
+            </button>
+        </div>
         <div class="stat" id="blocked-request-rate">{{ blocked_request_rate.rate }}%</div>
         <div class="label">{{ blocked_request_rate.blocked_count }} of {{ blocked_request_rate.total }}</div>
     </div>
     <div class="card">
-        <div class="label">Retry/Verify Rate</div>
+        <div class="label">Retry/Verify Rate
+            <button type="button" class="info-tooltip" aria-label="What does Retry/Verify Rate mean?">i
+                <span class="info-tooltip-text" role="tooltip">
+                    How often the system had to try asking the AI again — either because the first
+                    attempt failed or timed out, or because the answer didn't meet our quality bar
+                    and got a second try before being shown to you.
+                </span>
+            </button>
+        </div>
         <div class="stat" id="retry-verify-rate">{{ retry_verify_rate }}%</div>
     </div>
     <div class="card">
-        <div class="label">Human Review Rate</div>
+        <div class="label">Human Review Rate
+            <button type="button" class="info-tooltip" aria-label="What does Human Review Rate mean?">i
+                <span class="info-tooltip-text" role="tooltip">
+                    The share of requests that needed a manager's sign-off before an answer was even
+                    written — based on what was asked, not on what the AI would have said.
+                </span>
+            </button>
+        </div>
         <div class="stat" id="human-review-rate">{{ human_review_rate }}%</div>
     </div>
 </div>

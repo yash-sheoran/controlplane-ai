@@ -1,8 +1,26 @@
 {% extends "core/base.html" %}
 {% block title %}Overview — ControlPlane.ai{% endblock %}
 {% block content %}
+<style>
+    .info-tooltip {
+        position: relative; display: inline-flex; align-items: center; justify-content: center;
+        width: 15px; height: 15px; border-radius: 50%; background: var(--bg-hover); color: var(--text-secondary);
+        border: none; font-size: 10.5px; font-weight: 700; font-style: italic; font-family: Georgia, serif;
+        line-height: 1; padding: 0; margin-left: 6px; vertical-align: middle; cursor: default;
+    }
+    .info-tooltip:hover, .info-tooltip:focus { background: var(--border-strong); color: var(--text-primary); outline: none; }
+    .info-tooltip-text {
+        position: absolute; bottom: 130%; left: 50%; transform: translate(-50%, 4px);
+        width: 240px; background: var(--text-primary); color: #fff; font-style: normal; font-weight: 400;
+        font-family: var(--font-sans); font-size: 12px; line-height: 1.5; text-align: left;
+        padding: 8px 10px; border-radius: 8px; opacity: 0; visibility: hidden;
+        transition: opacity .12s ease, transform .12s ease; pointer-events: none; z-index: 5;
+    }
+    .info-tooltip:hover .info-tooltip-text, .info-tooltip:focus .info-tooltip-text {
+        opacity: 1; visibility: visible; transform: translate(-50%, 0);
+    }
+</style>
 <h1>Operational Overview</h1>
-<p class="label">Section 10.1 — Real-Time Operational Metrics</p>
 
 <div class="grid">
     <div class="card">
@@ -33,28 +51,24 @@
         {% endfor %}
         </tbody>
     </table>
-    <p>Total: <span id="decision-distribution-total">{{ decision_distribution.total }}</span></p>
     <canvas id="decision-distribution-chart" height="120"></canvas>
 </div>
 
 <div class="card">
-    <h3>End-to-End Latency (ms)</h3>
+    <h3>End-to-End Latency (ms)
+        <button type="button" class="info-tooltip" aria-label="What do P50, P90, and P99 mean?">i
+            <span class="info-tooltip-text" role="tooltip">
+                P50, P90, and P99 are percentiles of request latency.
+                P50 (median): half of requests were faster than this.
+                P90: 90% of requests were faster than this.
+                P99: only the slowest 1% of requests were slower than this.
+            </span>
+        </button>
+    </h3>
     <table>
         <tr><td>P50</td><td id="latency-p50">{{ latency_percentiles.p50 }}</td></tr>
         <tr><td>P90</td><td id="latency-p90">{{ latency_percentiles.p90 }}</td></tr>
         <tr><td>P99</td><td id="latency-p99">{{ latency_percentiles.p99 }}</td></tr>
-    </table>
-</div>
-
-<div class="card">
-    <h3>Cost Per Model</h3>
-    <table>
-        <thead><tr><th>Model</th><th>Cost (USD)</th></tr></thead>
-        <tbody>
-        {% for model, cost in cost_per_model.items %}
-            <tr><td>{{ model }}</td><td>${{ cost }}</td></tr>
-        {% endfor %}
-        </tbody>
     </table>
 </div>
 
@@ -65,8 +79,15 @@
         type: 'bar',
         data: {
             labels: rows.map(r => r.action),
-            datasets: [{ label: 'Requests', data: rows.map(r => r.count) }]
-        }
+            datasets: [{ label: 'Requests', data: rows.map(r => r.count), backgroundColor: '#171717', borderRadius: 4, maxBarThickness: 48 }]
+        },
+        options: {
+            plugins: { legend: { labels: { color: '#6b6b6b' } } },
+            scales: {
+                x: { ticks: { color: '#6b6b6b' }, grid: { display: false } },
+                y: { ticks: { color: '#6b6b6b' }, grid: { color: '#e5e5e5' } },
+            },
+        },
     });
 </script>
 {% endblock %}

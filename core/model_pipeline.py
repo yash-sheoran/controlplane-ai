@@ -9,6 +9,10 @@ import json
 import time
 from pathlib import Path
 
+from django.conf import settings
+
+from . import gemini_client
+
 # ---------------------------------------------------------------------------
 # Step 3 — Model Router
 # ---------------------------------------------------------------------------
@@ -108,27 +112,40 @@ def select_model(complexity_score, risk_score):
 # Step 4 — AI Model Execution
 # ---------------------------------------------------------------------------
 
-# Section 1.3/11.1: the prototype demonstrates the full pipeline "with
-# simulated models". The model identifiers named in Section 11.1
-# (claude-haiku-4-5, claude-sonnet-4-6, Claude Opus) are this document's own
-# placeholder names for the prototype, not real callable model strings, so
-# call_generating_model simulates a response rather than making a live API
-# call. It is the seam tests mock to control token counts, finish_reason,
-# and failures.
-
+# Section 11.1's tech stack names three Claude models by tier (see
+# MODEL_REGISTRY above); those identifiers are kept as the "model" value
+# throughout this pipeline (routing reasons, response_metrics, the pricing
+# config's keys, dashboard cost-per-model grouping) for consistency with
+# the rest of the doc-derived config. Since only Gemini is wired up as a
+# live backend, each is mapped to a real, callable Gemini model for the
+# actual generation call. All three currently map to the same model,
+# gemini-3.5-flash-lite, rather than one per tier: this project's
+# GEMINI_API_KEY is on the free tier, under which every "pro" model
+# returns a hard quota block (limit: 0, not just rate-limited), and
+# gemini-3.5-flash itself is capped at 5 requests/minute — too tight for
+# this app's normal traffic (a VERIFY/RETRY alone makes 2 calls; the
+# multi-turn session-risk flows and test suite make many more in a burst).
+# gemini-3.5-flash-lite's free-tier quota (~15 requests/minute) is the
+# only one of the three that reliably survives that traffic. Swap in a
+# paid key or split these back out per-tier once quota allows.
+GEMINI_MODEL_MAP = {
+    "claude-haiku-4-5": "gemini-3.5-flash-lite",
+    "claude-sonnet-4-6": "gemini-3.5-flash-lite",
+    "claude-opus": "gemini-3.5-flash-lite",
+}
 
 class ModelExecutionError(Exception):
     """Raised when a model call fails on every attempt (initial + retries)."""
 
 
-def call_generating_model(model_id, prompt):
-    """A single, unretried simulated call to the generating model.
-
-    Returns a dict shaped like a real model API response:
-      {"model": str, "text": str,
-       "usage": {"input_tokens": int, "output_tokens": int},
-       "finish_reason": str}
-    """
+def _simulated_response(model_id, prompt):
+    """The original stub response (pre-Gemini): deterministic, offline,
+    free. Used only under `manage.py test` (see settings.TESTING) — the
+    automated suite calls this unmocked in several places (timeout/retry
+    behaviour, multi-turn session-risk accumulation, etc.), and a live,
+    quota-limited, non-deterministic API call there would make the suite
+    flaky, slow, and dependent on a paid key rather than testing this
+    app's own logic."""
     input_tokens = max(1, len(prompt.split()))
     output_tokens = max(1, input_tokens // 2)
     return {
@@ -136,6 +153,38 @@ def call_generating_model(model_id, prompt):
         "text": f"[simulated response from {model_id}]",
         "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
         "finish_reason": "stop",
+    }
+
+
+def call_generating_model(model_id, prompt):
+    """A single, unretried call to the generating model, backed by the
+    Gemini API (see GEMINI_MODEL_MAP for the tier -> Gemini model mapping).
+    Falls back to a deterministic simulated response under the test
+    runner — see _simulated_response.
+
+    Returns a dict shaped like a real model API response:
+      {"model": str, "text": str,
+       "usage": {"input_tokens": int, "output_tokens": int},
+       "finish_reason": str}
+    """
+    if settings.TESTING:
+        return _simulated_response(model_id, prompt)
+
+    gemini_model = GEMINI_MODEL_MAP.get(model_id, model_id)
+    response = gemini_client.get_client().models.generate_content(
+        model=gemini_model, contents=prompt,
+    )
+    usage = response.usage_metadata
+    candidate = response.candidates[0] if response.candidates else None
+    finish_reason = candidate.finish_reason.name.lower() if candidate and candidate.finish_reason else "stop"
+    return {
+        "model": model_id,
+        "text": response.text or "",
+        "usage": {
+            "input_tokens": usage.prompt_token_count or 0,
+            "output_tokens": usage.candidates_token_count or 0,
+        },
+        "finish_reason": finish_reason,
     }
 
 

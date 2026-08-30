@@ -7,7 +7,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from . import pipeline
-from .models import Trace, UseCaseProfile
+from .models import Trace
 
 # Section 3 Step 9's five decision outcomes map to these HTTP statuses:
 # ALLOW/MODIFY/BLOCK are all *successful, complete* responses (BLOCK is a
@@ -45,7 +45,7 @@ def _safe_error_response():
 def create_request(request):
     """Section 3 Step 1 — Request Ingestion & Trace Initialisation.
 
-    Inputs: raw_prompt, user_id, session_id, use_case_id, client_metadata
+    Inputs: raw_prompt, user_id, session_id, client_metadata
     Outputs: request_id (UUID), trace_object (open), timestamp
     Latency: < 2 ms (in-memory)
     Failure: all failures in this step result in a 503 with a safe error
@@ -62,14 +62,11 @@ def create_request(request):
     raw_prompt = payload.get("raw_prompt")
     user_id = payload.get("user_id")
     session_id = payload.get("session_id")
-    use_case_id = payload.get("use_case_id")
     client_metadata = payload.get("client_metadata")
 
     if not isinstance(raw_prompt, str) or not raw_prompt.strip():
         return _safe_error_response()
     if not isinstance(user_id, str) or not user_id.strip():
-        return _safe_error_response()
-    if not isinstance(use_case_id, str) or not use_case_id.strip():
         return _safe_error_response()
 
     if client_metadata is None:
@@ -82,11 +79,6 @@ def create_request(request):
     except (ValueError, TypeError, AttributeError):
         return _safe_error_response()
 
-    try:
-        use_case = UseCaseProfile.objects.get(use_case_id=use_case_id, is_active=True)
-    except UseCaseProfile.DoesNotExist:
-        return _safe_error_response()
-
     # Section 3 Step 1: "the trace is never lost" — wrap creation in an
     # atomic transaction so a trace is either fully committed and returned
     # to the caller, or not created at all; never a partial/corrupt row.
@@ -95,7 +87,6 @@ def create_request(request):
             trace = Trace.objects.create(
                 session_id=session_uuid,
                 user_id=user_id,
-                use_case=use_case,
                 raw_prompt=raw_prompt,
                 client_metadata=client_metadata,
             )

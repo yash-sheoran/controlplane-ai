@@ -5,8 +5,10 @@ presidio-analyzer>=2.2,<2.3
 spacy>=3.8,<3.9
 pyyaml>=6.0,<7.0
 cryptography>=42.0
+google-genai>=2.19,<3.0
 
 # After installing requirements, download the small English spaCy model
 # used by core/pre_request_analysis.py for PERSON/ORGANIZATION/LOCATION
 # detection (Section 3 Step 2, 2A):
 #   python -m spacy download en_core_web_sm
+

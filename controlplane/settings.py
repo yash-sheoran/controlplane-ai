@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -19,6 +20,12 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 load_dotenv(BASE_DIR / ".env")
+
+# True under `manage.py test`. core.model_pipeline reads this to avoid
+# making live, quota-limited, non-deterministic third-party model calls
+# from the automated test suite — the same reason DEBUG/SECRET_KEY etc.
+# are environment-driven rather than hardcoded.
+TESTING = "test" in sys.argv
 
 
 # Quick-start development settings - unsuitable for production
@@ -31,6 +38,14 @@ SECRET_KEY = 'django-insecure-+&xk42v@w5=3(m46_s2u^amc_p&&q1$wble%6+m8id0wq)*^_1
 DEBUG = True
 
 ALLOWED_HOSTS = []
+
+# Role-based access control (core/authz.py, core/auth_views.py): employees
+# only reach Playground, managers reach every dashboard page. Any
+# @login_required redirect (or the login view's own fallback) sends an
+# unauthenticated visitor here.
+LOGIN_URL = 'login'
+LOGIN_REDIRECT_URL = 'playground'
+LOGOUT_REDIRECT_URL = 'login'
 
 
 # Application definition
@@ -68,6 +83,7 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                'core.context_processors.access',
             ],
         },
     },
@@ -122,7 +138,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'Asia/Kolkata'
 
 USE_I18N = True
 

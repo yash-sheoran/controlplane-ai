@@ -11,7 +11,7 @@ Prerequisites: setup completed per `README.md` (venv, MySQL, migrations,
 
 ---
 
-## 0. Defaults you must review before real use
+## 0. Defaults you must review before real use 
 
 Everything below is either a security-sensitive default, a hackathon
 placeholder value, or a config that ships empty and needs real business
@@ -96,7 +96,7 @@ authentication (Django's built-in auth, SSO, etc.) before production use.
 
 ---
 
-## 1. Endpoints at a glance
+## 1. Endpoints at a glances
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -313,6 +313,7 @@ python manage.py shell
 import json
 from unittest.mock import patch
 from core.models import Trace, UseCaseProfile
+
 from core import pipeline
 
 use_case = UseCaseProfile.objects.get(use_case_id="DecisionSupport")

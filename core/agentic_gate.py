@@ -22,7 +22,7 @@ SAFETY_RISK_HOLD_THRESHOLD = 7
 POLICY_VIOLATION_RISK_HOLD_THRESHOLD = 6
 
 
-def gate_agent_action(action_description, use_case_profile="AgenticAction"):
+def gate_agent_action(action_description):
     """Section 6.2: "Before executing any tool call or external action,
     the system audits the intended action description as if it were a
     response." Reuses core.auditing_engine.run_auditing_engine, passing
@@ -37,7 +37,6 @@ def gate_agent_action(action_description, use_case_profile="AgenticAction"):
     audit_result = ae.run_auditing_engine(
         original_prompt="[agentic pre-action audit]",
         ai_response=action_description,
-        use_case_profile=use_case_profile,
     )
 
     held = False

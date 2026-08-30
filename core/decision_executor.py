@@ -48,8 +48,11 @@ def execute_allow(response_text, token_map=None):
 # own context rather than unified into one made-up shared vocabulary.
 _REDACTION_CATEGORY_LABELS = {"PERSON": "NAME"}
 
+# Not "...has been modified to remove..." — per the product decision in
+# execute_modify below, nothing in the response is ever removed/altered
+# anymore, so the notice must not claim otherwise.
 DEFAULT_DISCLOSURE_NOTICE = (
-    "This response has been modified to remove sensitive information."
+    "This response was flagged during audit for containing potentially sensitive information."
 )
 
 
@@ -109,53 +112,66 @@ def decrypt_original_content(token):
 
 
 def execute_modify(response_text, disclosure_notice=DEFAULT_DISCLOSURE_NOTICE):
-    """Section 3 Step 9 MODIFY: redacts PII, encrypts and logs the
-    original content, and returns the modified response with an optional
-    disclosure notice.
+    """Section 3 Step 9 MODIFY — per explicit product decision, this no
+    longer redacts anything: an LLM-GENERATED reply is delivered to the
+    user exactly as generated, PII and all. It is still audited (which
+    PII categories, if any, are present — logged below for the
+    compliance trail) but never altered or masked.
 
-    Note: the doc's "For structured content, selectively removes or
-    replaces flagged sections" names no concrete mechanism or field
-    anywhere in the document beyond PII masking, so no additional
-    structured-content removal logic is implemented here.
+    This is a deliberate divergence from Section 3 Step 9's own MODIFY
+    description ("Applies regex + NER-based PII masking"); the
+    PROMPT-side pseudonymisation (Section 3 Step 2, 2A — PII the USER
+    types is replaced with a reversible placeholder before the model
+    ever sees it) is unaffected and still happens exactly as before —
+    only this RESPONSE-side redaction has been removed.
+
+    disclosure_notice still accompanies the response, so the user knows
+    this reply was flagged during audit, even though its content is
+    unchanged.
     """
-    redacted_text, categories_redacted = redact_pii(response_text)
-    encrypted_original = encrypt_original_content(response_text)
+    _, categories_detected = redact_pii(response_text)
     return {
         "final_decision": "MODIFY",
-        "user_response": redacted_text,
+        "user_response": response_text,
         "disclosure_notice": disclosure_notice,
         "modification_log": {
-            "original_content_encrypted": encrypted_original,
-            "modified_output": redacted_text,
-            "categories_redacted": categories_redacted,
+            "categories_detected": categories_detected,
         },
     }
 
 
 # ---------------------------------------------------------------------------
 # HUMAN_REVIEW
+#
+# Per explicit product decision, Human Review is now decided ONLY by a
+# prompt-time policy audit (core.auditing_engine.run_prompt_policy_audit +
+# core.policy_engine.evaluate_prompt_policy), run before any generation
+# call — never by anything response-driven. So, unlike the response-
+# shaped queued case this replaced (which carried a raw/redacted response
+# and full audit JSON because a response already existed by the time
+# HUMAN_REVIEW could fire), a case queued here never has a response yet:
+# the reviewer sees the prompt plus which company-policy categories it
+# matched and why. Approving is what causes generation to happen for the
+# very first time (core.pipeline.resume_after_prompt_review) — there is
+# nothing yet for a reviewer to hand-edit, so REVIEWER_DECISIONS is
+# binary (APPROVE/REJECT), unlike the old response-stage APPROVE/MODIFY/
+# REJECT.
 # ---------------------------------------------------------------------------
 
-DEFAULT_ESTIMATED_WAIT_MINUTES = 30
-REVIEWER_DECISIONS = {"APPROVE", "MODIFY", "REJECT"}
+REVIEWER_DECISIONS = {"APPROVE", "REJECT"}
 
 
-def execute_human_review(audit_json, raw_response, redacted_response,
-                          policy_trigger_reason, estimated_wait_minutes=DEFAULT_ESTIMATED_WAIT_MINUTES):
-    """Section 3 Step 9 HUMAN_REVIEW: "The response is queued ... The
-    user is informed of a review delay with an estimated wait time. The
-    reviewer receives the full audit JSON, the raw and redacted
-    responses, and the policy trigger reason."
-
-    Returns the queued case (to be persisted by a future integration
-    step) and the message shown to the user while they wait.
+def execute_prompt_human_review(reason, violated_policies):
+    """Section 3 Step 9 HUMAN_REVIEW, prompt-time variant: "The user is
+    informed of a review delay... The reviewer receives... the policy
+    trigger reason." Queues the case (to be persisted by the caller) and
+    returns the message shown to the user while they wait — no response
+    exists yet, so there is nothing to show them but that.
     """
     queued_case = {
         "status": "PENDING",
-        "audit_json": audit_json,
-        "raw_response": raw_response,
-        "redacted_response": redacted_response,
-        "policy_trigger_reason": policy_trigger_reason,
+        "violated_policies": violated_policies,
+        "policy_trigger_reason": reason,
         "reviewer_id": None,
         "decision": None,
         "decided_at": None,
@@ -164,39 +180,30 @@ def execute_human_review(audit_json, raw_response, redacted_response,
     return {
         "final_decision": "HUMAN_REVIEW",
         "user_response": (
-            f"Your request is being reviewed by a human reviewer. "
-            f"Estimated wait time: {estimated_wait_minutes} minutes."
+            "Your request requires approval before it can be processed. "
+            "You'll see the response here once it's reviewed."
         ),
-        "estimated_wait_minutes": estimated_wait_minutes,
         "queued_case": queued_case,
     }
 
 
-def apply_reviewer_decision(queued_case, decision, reviewer_id, modified_response=None, decided_at=None):
-    """Section 3 Step 9 HUMAN_REVIEW: "The reviewer can approve, modify,
-    or reject. All reviewer actions are timestamped and attributed."
+def apply_prompt_review_decision(queued_case, decision, reviewer_id, decided_at=None):
+    """Section 3 Step 9 HUMAN_REVIEW, prompt-time variant: "All reviewer
+    actions are timestamped and attributed."
 
-    - APPROVE: the queued raw_response is sent to the user as-is.
-    - MODIFY: `modified_response` (required) is sent to the user.
-    - REJECT: nothing of the original response is returned; the same
-      safe, generic message used by BLOCK is shown, applying that
-      section's explicit principle (never reveal internal reasoning to
-      the user) to this analogous case, which the doc does not spell out
-      a separate message for.
+    - APPROVE: signals the caller (core.pipeline.resume_after_prompt_
+      review) to now run generation for the first time; final_user_
+      response is filled in by that caller once it has a real response,
+      not by this pure function.
+    - REJECT: nothing is ever generated; the same safe, generic message
+      BLOCK uses is shown, applying that section's explicit principle
+      (never reveal internal reasoning to the user) to this analogous
+      case, which the doc does not spell out a separate message for.
     """
     if decision not in REVIEWER_DECISIONS:
         raise ValueError(f"decision must be one of {sorted(REVIEWER_DECISIONS)}, got {decision!r}")
-    if decision == "MODIFY" and not modified_response:
-        raise ValueError("modified_response is required when decision is MODIFY")
     if decided_at is None:
         decided_at = timezone.now()
-
-    if decision == "APPROVE":
-        final_user_response = queued_case.get("raw_response")
-    elif decision == "MODIFY":
-        final_user_response = modified_response
-    else:  # REJECT
-        final_user_response = SAFE_BLOCK_MESSAGE
 
     updated_case = dict(queued_case)
     updated_case.update({
@@ -204,7 +211,7 @@ def apply_reviewer_decision(queued_case, decision, reviewer_id, modified_respons
         "decision": decision,
         "reviewer_id": reviewer_id,
         "decided_at": decided_at,
-        "final_user_response": final_user_response,
+        "final_user_response": None if decision == "APPROVE" else SAFE_BLOCK_MESSAGE,
     })
     return updated_case
 
@@ -215,6 +222,17 @@ def apply_reviewer_decision(queued_case, decision, reviewer_id, modified_respons
 
 # Quoted verbatim from Section 3 Step 9 BLOCK's own example.
 SAFE_BLOCK_MESSAGE = "This response cannot be provided as it may contain sensitive information."
+
+# Shown whenever a live model call (generation, risk analysis, or
+# auditing) fails on every attempt — most likely a free-tier rate limit
+# or a timeout — rather than a raw exception string or a silent, endless
+# wait. Used by core.dashboard_views for both the synchronous Playground
+# submit path and the manager-approval resume path.
+SAFE_GENERATION_UNAVAILABLE_MESSAGE = (
+    "This response could not be generated because the AI service is "
+    "temporarily unavailable — it may have hit a rate limit or timed out. "
+    "Please try again in a moment."
+)
 
 
 def execute_block(internal_reason):
@@ -268,19 +286,21 @@ def _next_tier_up_model(model_id):
 
 def _execute_resolved_outcome(outcome):
     """Dispatches a retry attempt's resolved (non-VERIFY) final_action to
-    its own decision-path function."""
+    its own decision-path function. HUMAN_REVIEW is deliberately not one
+    of these: a retry attempt's final_action comes from core.pipeline's
+    response-side auditing/policy evaluation, which per product decision
+    can no longer produce HUMAN_REVIEW at all (see core.policy_engine's
+    RULE_ORDER comment) — only the prompt-time audit can, and that always
+    runs before any retry loop even starts."""
     action = outcome["final_action"]
     if action == "ALLOW":
-        return execute_allow(outcome["response_text"], outcome.get("token_map"))
+        result = execute_allow(outcome["response_text"], outcome.get("token_map"))
+        result["verify_warnings"] = outcome.get("verify_warnings") or []
+        return result
     if action == "MODIFY":
-        return execute_modify(outcome["response_text"])
-    if action == "HUMAN_REVIEW":
-        return execute_human_review(
-            audit_json=outcome.get("audit_json", {}),
-            raw_response=outcome.get("response_text"),
-            redacted_response=outcome.get("redacted_response"),
-            policy_trigger_reason=outcome.get("policy_trigger_reason", ""),
-        )
+        result = execute_modify(outcome["response_text"])
+        result["verify_warnings"] = outcome.get("verify_warnings") or []
+        return result
     if action == "BLOCK":
         return execute_block(outcome.get("policy_trigger_reason", ""))
     raise ValueError(f"Unexpected resolved final_action from a retry attempt: {action!r}")
@@ -290,16 +310,20 @@ def execute_verify_retry(attempt_fn, initial_model_id, max_retries=2):
     """Section 3 Step 9 VERIFY/RETRY: "A new generation is requested. On
     first retry, the same model is used with an enhanced system prompt
     instructing it to be more careful. On second retry, the router
-    selects the next tier up. If after two retries the score is still
-    below threshold, the decision escalates to HUMAN_REVIEW. Maximum
-    retry count per request is configurable (default: 2)."
+    selects the next tier up. Maximum retry count per request is
+    configurable (default: 2)." (The doc continues: "If after two
+    retries the score is still below threshold, the decision escalates
+    to HUMAN_REVIEW" — superseded by later product decision: response-
+    side auditing can never escalate to HUMAN_REVIEW, see this
+    function's own exhaustion branch below.)
 
     `attempt_fn(model_id, enhanced_prompt) -> dict` represents one full
     generate + audit + policy-check attempt (Steps 4/6/7 composed), and
     must return at least {"final_action": str, "response_text": str},
     plus whatever else the resolved action needs (token_map for ALLOW,
-    audit_json/policy_trigger_reason for HUMAN_REVIEW/BLOCK). It is the
-    seam tests mock to control each attempt's outcome deterministically.
+    verify_warnings for ALLOW/MODIFY, policy_trigger_reason for BLOCK).
+    It is the seam tests mock to control each attempt's outcome
+    deterministically.
 
     On the first retry the doc explicitly calls for the *same* model with
     an enhanced prompt; the doc does not repeat the "enhanced prompt"
@@ -332,12 +356,28 @@ def execute_verify_retry(attempt_fn, initial_model_id, max_retries=2):
             return result
 
     # "If after two retries the score is still below threshold, the
-    # decision escalates to HUMAN_REVIEW."
-    result = execute_human_review(
-        audit_json=outcome.get("audit_json", {}) if outcome else {},
-        raw_response=outcome.get("response_text") if outcome else None,
-        redacted_response=outcome.get("redacted_response") if outcome else None,
-        policy_trigger_reason="Exhausted VERIFY/RETRY attempts without passing audit.",
+    # decision escalates to HUMAN_REVIEW" — per LATER product decision,
+    # response-side auditing can never escalate to HUMAN_REVIEW at all
+    # (only the prompt-time policy audit may queue a request for human
+    # review, and that already ran, before this retry loop, on the
+    # original prompt). So instead: deliver the last attempt's response
+    # as-is, with its own per-dimension verify_warnings plus one
+    # synthetic warning noting the retries didn't resolve the concern —
+    # "the response should still be displayed to the user, with the
+    # appropriate warning."
+    result = execute_allow(
+        outcome.get("response_text") if outcome else None,
+        outcome.get("token_map") if outcome else None,
     )
+    warnings = list(outcome.get("verify_warnings") or []) if outcome else []
+    warnings.append({
+        "dimension": "retry_exhausted",
+        "score": None,
+        "message": (
+            "This response is shown after multiple attempts to improve it; "
+            "it may still have quality issues."
+        ),
+    })
+    result["verify_warnings"] = warnings
     result["retry_attempts"] = attempts
     return result
