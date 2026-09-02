@@ -7,8 +7,13 @@ pyyaml>=6.0,<7.0
 cryptography>=42.0
 google-genai>=2.19,<3.0
 
-# After installing requirements, download the small English spaCy model
-# used by core/pre_request_analysis.py for PERSON/ORGANIZATION/LOCATION
-# detection (Section 3 Step 2, 2A):
-#   python -m spacy download en_core_web_sm
+# Production serving (Railway). gunicorn replaces `runserver`, which is
+# not safe for real traffic; whitenoise serves django.contrib.admin's
+# static assets from the app process once DEBUG is False.
+gunicorn>=23.0
+whitenoise>=6.8
 
+# The spaCy model used by core/pre_request_analysis.py for PERSON/ORG
+# detection. Installed from a pinned wheel so the container build needs
+# no separate `python -m spacy download` step.
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

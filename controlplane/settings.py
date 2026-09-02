@@ -32,12 +32,45 @@ TESTING = "test" in sys.argv
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-+&xk42v@w5=3(m46_s2u^amc_p&&q1$wble%6+m8id0wq)*^_1'
+# Read from the environment so the deployed key is never committed. The
+# fallback below is for local development and `manage.py test` only.
+SECRET_KEY = os.environ.get(
+    'DJANGO_SECRET_KEY',
+    'django-insecure-local-development-only-never-use-in-production',
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Defaults to off, so a forgotten env var can never expose tracebacks on a
+# public deployment. Local development sets DJANGO_DEBUG=True in .env.
+DEBUG = os.environ.get('DJANGO_DEBUG', 'False').lower() == 'true'
 
-ALLOWED_HOSTS = []
+# Railway injects RAILWAY_PUBLIC_DOMAIN with the service's public hostname,
+# so the deployment needs no manual host configuration.
+ALLOWED_HOSTS = [h.strip() for h in os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',') if h.strip()]
+_public_domain = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
+if _public_domain:
+    ALLOWED_HOSTS.append(_public_domain)
+if not ALLOWED_HOSTS:
+    ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+
+# Django requires the scheme here. Railway serves every deployment over
+# HTTPS, so POSTs from the dashboards/playground need the origin trusted.
+CSRF_TRUSTED_ORIGINS = [
+    f'https://{h}' for h in ALLOWED_HOSTS if h not in ('localhost', '127.0.0.1')
+]
+
+# Railway terminates TLS at its edge and forwards the request over plain
+# HTTP; without this Django believes the request was insecure.
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# Cookie/redirect hardening, applied only when DEBUG is off so local
+# development over plain http keeps working. HSTS is deliberately left
+# unset: it is browser-cached and hard to walk back, which is not a
+# trade worth making on a temporary *.up.railway.app hostname.
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
 
 # Role-based access control (core/authz.py, core/auth_views.py): employees
 # only reach Playground, managers reach every dashboard page. Any
@@ -62,6 +95,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -149,6 +183,15 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
 
 STATIC_URL = 'static/'
+
+# `collectstatic` target. The app's own CSS is inlined in base.html, so this
+# exists to serve django.contrib.admin's assets when DEBUG is False.
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'},
+}
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
