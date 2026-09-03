@@ -36,7 +36,7 @@ throughput ceiling imposed by the model quota.
 - [Configuration](#configuration)
 - [Deployment](#deployment)
 - [Performance and limits](#performance-and-limits)
-- [Known inconsistencies in the source document](#known-inconsistencies-in-the-source-document)
+- [Deliberate departures from the specification](#deliberate-departures-from-the-specification)
 
 ---
 
@@ -673,23 +673,11 @@ managed MySQL service supplying the `DB_*` variables.
 
 ---
 
-## Known inconsistencies in the source document
+## Deliberate departures from the specification
 
-Found while implementing, and resolved by following the document's literal
-wording rather than picking a number that merely looked right. Each is
-documented in the relevant module docstring.
-
-1. **Composite risk formula.** Section 4.1's formula, applied to the Appendix
-   (14.1) worked example's own scores, yields **3.3** — not the **2.8** that
-   sample record states. The implementation follows the formula as defined,
-   since 4.1 is the only place the formula itself appears.
-2. **Threshold examples.** Section 3 Step 8's illustrative rules use different
-   numbers than Section 5.1's concrete YAML example. `policy.yaml` follows
-   5.1's literal values, that being the actual config example.
-3. **Latency budget.** Section 3 Step 4 says "30s"; Section 5.1's YAML says
-   `latency_budget_ms: 8000`. `policy.yaml` follows 5.1.
-
-### Deliberate departures from the document
+Places where the implementation intentionally diverges from the source
+architecture document. Each is explained in full in the relevant module
+docstring.
 
 - **Human Review moved to the prompt stage.** It used to be reachable only
   after a response existed. It is now decided solely by auditing the raw prompt
