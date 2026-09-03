@@ -251,7 +251,7 @@ erDiagram
     }
     UserProfile {
         string role "employee or manager"
-        fk manager
+        int manager_id FK "self-reference to a manager"
     }
 ```
 
