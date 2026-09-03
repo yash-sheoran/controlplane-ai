@@ -10,11 +10,11 @@ dashboard, a human-review queue, and a feedback loop.
 Nothing reaches the user unaudited, and every request leaves a complete,
 queryable audit record.
 
-**Live demo: [controlplane-ai-production.up.railway.app](https://controlplane-ai-production.up.railway.app)**
-&nbsp;&mdash;&nbsp; register a manager account first, then an employee against that
-manager's email. Read [Operating the live deployment](#operating-the-live-deployment)
-before demoing: the audited path takes around nine seconds per request and the
-model quota is limited.
+**Live instance: [controlplane-ai-production.up.railway.app](https://controlplane-ai-production.up.railway.app)**
+&nbsp;&mdash;&nbsp; registration requires a manager account to exist before an
+employee can be created against it. See
+[Performance and limits](#performance-and-limits) for request latency and the
+throughput ceiling imposed by the model quota.
 
 ---
 
@@ -35,7 +35,7 @@ model quota is limited.
 - [Web interface and roles](#web-interface-and-roles)
 - [Configuration](#configuration)
 - [Deployment](#deployment)
-- [Operating the live deployment](#operating-the-live-deployment)
+- [Performance and limits](#performance-and-limits)
 - [Known inconsistencies in the source document](#known-inconsistencies-in-the-source-document)
 
 ---
@@ -614,73 +614,62 @@ and is the right shape for this workload.
 
 ---
 
-## Operating the live deployment
+## Performance and limits
 
-The hosted instance runs on Railway from the `Dockerfile` in this repo. These
-are the operational characteristics that matter when demonstrating it, all
-measured against the running deployment rather than estimated.
+Every figure below was measured against the deployed instance.
 
-### Latency is real: about 9 seconds on the ALLOW path
+### Request latency
 
-A single allowed request makes **four sequential model calls** — risk/complexity
+An allowed request makes **four sequential model calls**: risk and complexity
 triage, the prompt-time policy audit, generation, then the twelve-dimension
-response audit. Measured end to end against the live instance:
+response audit. Paths that resolve earlier make fewer calls and return sooner.
 
-| Path | Time | Why |
+| Path | Latency | Model calls |
 |---|---|---|
-| ALLOW | ~9.2 s | All four calls run |
-| BLOCK via router pre-check | ~3.1 s | Triage only; blocked before generation |
-| HUMAN_REVIEW | ~2.1 s | Triage plus prompt audit; no generation call |
+| `ALLOW` | ~9.2 s | 4 |
+| `BLOCK` via router pre-check | ~3.1 s | 1 — blocked before generation |
+| `HUMAN_REVIEW` | ~2.1 s | 2 — queued before generation |
 
-This is the cost of the architecture, not a performance bug: every response is
-audited before delivery. Frame it as a **governed workflow, not a chat product**
-— the comparison is a compliance review that takes days, not a chatbot that
-replies instantly. Making it feel fast means moving the audits onto a task
-queue so the response returns as soon as generation completes, and running the
-two independent calls concurrently instead of in sequence.
+This is inherent to auditing every response before it is delivered rather than
+a performance defect: the system trades latency for the guarantee that nothing
+reaches the user unaudited. Reducing it means moving the audit off the request
+path onto a task queue, so a response returns as soon as generation completes,
+and issuing the two independent calls concurrently rather than in sequence.
+Neither requires architectural change, since every pipeline stage is already a
+pure function.
 
-### Model quota is the real constraint during a demo
+### Throughput ceiling
 
-Generation and auditing both run on `gemini-3.5-flash-lite`, whose free-tier
-quota is roughly **15 requests per minute**. At up to four calls per request,
-that is about **3–4 end-user requests per minute** before the quota rejects
-calls.
+Triage, generation and both audits all run on `gemini-3.5-flash-lite`, whose
+free-tier quota allows roughly **15 requests per minute**. At up to four calls
+per end-user request, sustained throughput is therefore about **3–4 requests
+per minute**, and concurrent use exhausts the quota quickly.
 
-Practical consequence: **do not have several people submitting prompts at the
-same time.** A quota rejection surfaces as a failed generation, which looks
-like a broken app rather than a rate limit. Drive the demo from one screen.
+An exhausted quota surfaces as a failed generation rather than an explicit
+rate-limit response, so it is worth distinguishing from an application error
+when reading logs. A paid key raises the ceiling and also allows the three
+router tiers to map to separate models, which the free tier currently prevents
+— see [Model routing](#model-routing).
 
-### Hosting cost
+### Hosting
 
-Railway has no free tier — it grants a one-time trial credit. At the time of
-deployment the project showed **$5.00 / 29 days remaining**, which comfortably
-covers a hackathon but is not indefinite. Check the Railway dashboard for the
-current figure; if the credit runs out the service stops rather than degrading.
+The instance runs on Railway, built from the `Dockerfile` in this repo, with a
+managed MySQL service supplying the `DB_*` variables.
 
-### Deploys are automatic
-
-Pushing to `main` triggers a rebuild and redeploy — no manual step. The first
-build takes 6–12 minutes because it installs Presidio, spaCy, numpy and the
-15 MB language model, and compiles `mysqlclient`. Later builds are far faster
-(2–3 minutes) since Docker only rebuilds the final `COPY` layer.
-
-Two deployment notes worth knowing:
-
-- `ALLOWED_HOSTS` is derived from `RAILWAY_PUBLIC_DOMAIN`, which only exists
-  once a domain has been generated, and is read at startup. Generating a domain
-  after the first deploy therefore requires **one redeploy**, or every request
-  returns `400 Bad Request`.
-- If the container is OOM-killed at boot (exit 137), spaCy across two gunicorn
-  workers has exceeded the memory allowance. Drop `--workers 2` to
-  `--workers 1` in the `Dockerfile`.
-
-### Existing data in the live instance
-
-The live database contains **three smoke-test traces** under the `user_id`
-`deploy-smoke-test`, created while verifying the ALLOW, BLOCK and HUMAN_REVIEW
-paths in production. They are invisible in every manager dashboard, because
-those views are scoped to a manager's own team and that `user_id` belongs to no
-registered account. They can be left in place or cleared from `/admin/`.
+- **Deploys are automatic.** Pushing to `main` rebuilds and redeploys. The
+  first build takes 6–12 minutes because it installs Presidio, spaCy, numpy and
+  the 15 MB language model, and compiles `mysqlclient`; subsequent builds take
+  2–3 minutes, as only the final layer changes.
+- **`ALLOWED_HOSTS` is read at startup** from `RAILWAY_PUBLIC_DOMAIN`, which
+  does not exist until a domain has been generated. Generating a domain after
+  the first deploy requires one redeploy, otherwise every request returns
+  `400 Bad Request`.
+- **An OOM kill at boot** (exit code 137) means spaCy across two gunicorn
+  workers exceeded the memory allowance; reduce `--workers 2` to `--workers 1`
+  in the `Dockerfile`.
+- **Cost.** Railway has no free tier, granting a one-time trial credit instead.
+  When the credit is exhausted the service stops rather than degrading, so the
+  remaining balance is worth checking before relying on the instance.
 
 ---
 
