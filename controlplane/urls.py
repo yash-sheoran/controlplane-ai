@@ -16,10 +16,17 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import include, path
+from django.views.generic import RedirectView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('core.urls')),
     path('dashboard/', include('core.dashboard_urls')),
     path('accounts/', include('core.auth_urls')),
+    # The bare domain had no route at all, so '/' returned a bare 404 —
+    # the first thing anyone given the deployed link actually sees.
+    # Send it to the Playground, which is the app's real entry point;
+    # @login_required bounces an unauthenticated visitor on to the login
+    # page, so this lands both cases somewhere useful.
+    path('', RedirectView.as_view(pattern_name='playground', permanent=False)),
 ]
